@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+.pytest_cache/
+.mypy_cache/
+
+# Virtualenv
+.venv/
+backend/.venv/
+backend/.venv_run/
+
+# Env
+.env
+
+# Data
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+backend/data/
+
+# Build
+build/
+dist/
+*.egg-info/
+
+# OS
+.DS_Store
+archive/
