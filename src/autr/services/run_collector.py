@@ -7,11 +7,9 @@ Strategy Consumer가 이 큐를 구독해 시그널을 생성한다.
 import asyncio
 import json
 import os
-import time
 import argparse
 import logging
 from typing import List
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from dotenv import load_dotenv
 
@@ -49,15 +47,56 @@ def _latest_tick(store: QuantSQLiteStore, symbol: str) -> dict | None:
     }
 
 
+async def _async_main(args, symbols, timeframes, db_path, redis_url, max_workers):
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
+    logger = logging.getLogger("quant-pipeline")
+
+    client = BybitClient()
+    store = QuantSQLiteStore(db_path)
+    collector = QuantDataCollector(client, store)
+    redis = create_redis_adapter(redis_url)
+
+    logger.info("Pipeline started db=%s symbols=%s intervals=%s", db_path, symbols, timeframes)
+
+    loop = asyncio.get_running_loop()
+
+    while True:
+        run_id = store.start_run()
+        try:
+            # 동기 수집 작업을 스레드풀에서 실행 (이벤트 루프 블로킹 방지)
+            futures = [
+                loop.run_in_executor(None, collector.collect_symbol, symbol, timeframes)
+                for symbol in symbols
+            ]
+            await asyncio.gather(*futures)
+            store.end_run(run_id, "success", "cycle completed")
+            logger.info("Cycle completed")
+
+            # 각 심볼의 최신 1분봉을 tick 큐에 발행
+            for symbol in symbols:
+                tick = _latest_tick(store, symbol)
+                if tick:
+                    await redis.queue_push(tick_queue(symbol), json.dumps(tick))
+                    logger.debug("[Collector] tick 발행: %s close=%.4f", symbol, tick["close"])
+
+            # Watchdog heartbeat 기록
+            await record_heartbeat("collector", redis, ttl=_HB_TTL)
+
+        except Exception as exc:
+            store.end_run(run_id, "error", str(exc))
+            logger.exception("Cycle failed: %s", exc)
+
+        if args.once:
+            break
+        await asyncio.sleep(max(5, args.sleep))
+
+
 def main():
     load_dotenv()
     parser = argparse.ArgumentParser(description="Bybit quant time-series ingestion pipeline")
     parser.add_argument("--once", action="store_true", help="Run one cycle then exit")
     parser.add_argument("--sleep", type=int, default=int(os.getenv("DATA_PIPELINE_SLEEP_SEC", "60")))
     args = parser.parse_args()
-
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
-    logger = logging.getLogger("quant-pipeline")
 
     symbols = _parse_list(
         os.getenv("DATA_PIPELINE_SYMBOLS", "BTCUSDT,XRPUSDT,SOLUSDT"),
@@ -69,44 +108,9 @@ def main():
     )
     db_path = os.getenv("QUANT_DB_PATH", "./data/quant_timeseries.db")
     redis_url = os.getenv("REDIS_URL", "")
-
-    client = BybitClient()
-    store = QuantSQLiteStore(db_path)
-    collector = QuantDataCollector(client, store)
-    redis = create_redis_adapter(redis_url)
     max_workers = int(os.getenv("DATA_PIPELINE_WORKERS", "2"))
-    logger.info("Pipeline started db=%s symbols=%s intervals=%s", db_path, symbols, timeframes)
 
-    while True:
-        run_id = store.start_run()
-        try:
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                futures = [
-                    executor.submit(collector.collect_symbol, symbol, timeframes)
-                    for symbol in symbols
-                ]
-                for future in as_completed(futures):
-                    future.result()
-            store.end_run(run_id, "success", "cycle completed")
-            logger.info("Cycle completed")
-
-            # 각 심볼의 최신 1분봉을 tick 큐에 발행
-            for symbol in symbols:
-                tick = _latest_tick(store, symbol)
-                if tick:
-                    asyncio.run(redis.queue_push(tick_queue(symbol), json.dumps(tick)))
-                    logger.debug("[Collector] tick 발행: %s close=%.4f", symbol, tick["close"])
-
-            # Watchdog heartbeat 기록
-            asyncio.run(record_heartbeat("collector", redis, ttl=_HB_TTL))
-
-        except Exception as exc:
-            store.end_run(run_id, "error", str(exc))
-            logger.exception("Cycle failed: %s", exc)
-
-        if args.once:
-            break
-        time.sleep(max(5, args.sleep))
+    asyncio.run(_async_main(args, symbols, timeframes, db_path, redis_url, max_workers))
 
 
 if __name__ == "__main__":
