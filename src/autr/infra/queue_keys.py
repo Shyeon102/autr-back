@@ -8,6 +8,7 @@ Redis 키 상수.
 제어 흐름 (API 서버 → Consumer):
   trading:enabled:{symbol}   — "1" 이면 거래 활성, 없으면 비활성
   state:strategy:{symbol}    — Consumer가 기록하는 전략 상태 JSON
+  config:strategy:{symbol}   — 활성 전략 이름 (API 서버가 설정)
 """
 
 
@@ -24,6 +25,11 @@ def trading_enabled_key(symbol: str) -> str:
 def strategy_state_key(symbol: str) -> str:
     """Consumer가 기록하는 전략 상태 키. e.g. state:strategy:BTCUSDT"""
     return f"state:strategy:{symbol.upper()}"
+
+
+def active_strategy_key(symbol: str) -> str:
+    """활성 전략 이름 키. e.g. config:strategy:BTCUSDT"""
+    return f"config:strategy:{symbol.upper()}"
 
 
 SIGNAL_QUEUE = "queue:signals"

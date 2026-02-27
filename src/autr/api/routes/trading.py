@@ -960,43 +960,20 @@ async def change_strategy(
     body: StrategyChangeRequest,
     _auth=Depends(require_api_key),
 ):
-    """전략 변경 (자동매매가 멈춘 상태에서만 허용)"""
-    trading_strategy = getattr(request.app.state, "trading_strategy", None)
-
-    if trading_strategy and trading_strategy.is_active:
-        raise HTTPException(
-            status_code=400,
-            detail="Stop trading before changing strategy.",
-        )
+    """전략 변경 — Redis에 전략 이름 저장, Consumer가 다음 tick에 자동 교체"""
+    from autr.infra.queue_keys import active_strategy_key
+    redis = request.app.state.redis
+    symbol = os.getenv("STRATEGY_SYMBOL", "BTCUSDT").upper()
 
     strategy_name = _validate_strategy_name(body.strategy)
+    await redis.set(active_strategy_key(symbol), strategy_name)
 
-    build_strategy = getattr(request.app.state, "build_strategy", None)
-    if not build_strategy:
-        raise HTTPException(status_code=500, detail="Strategy factory not available.")
-
-    current_symbol = "BTCUSDT"
-    if trading_strategy:
-        current_status = trading_strategy.get_strategy_status()
-        current_params = current_status.get("parameters", {}) or {}
-        current_symbol = _validate_symbol(str(current_params.get("symbol", "BTCUSDT")))
-
-    preset_overrides = await _load_preset_overrides(strategy_name, current_symbol)
-    preset_overrides["symbol"] = current_symbol
-
-    trading_client = get_trading_client(request)
-    new_strategy = build_strategy(
-        strategy_name,
-        trading_client,
-        preset_overrides=preset_overrides,
-    )
-    request.app.state.trading_strategy = new_strategy
-
-    logger.info("Strategy changed to: %s (%s)", strategy_name, current_symbol)
+    logger.info("[API] 전략 변경 요청: %s → %s", symbol, strategy_name)
     return {
         "success": True,
         "strategy": strategy_name,
-        "status": new_strategy.get_strategy_status(),
+        "symbol": symbol,
+        "note": "strategy_consumer will apply on next tick",
     }
 
 

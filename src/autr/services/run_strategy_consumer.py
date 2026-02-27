@@ -29,6 +29,7 @@ from autr.infra.db.factory import create_db
 from autr.infra.db.quant_store import QuantSQLiteStore
 from autr.infra.queue_keys import (
     SIGNAL_QUEUE,
+    active_strategy_key,
     strategy_state_key,
     tick_queue,
     trading_enabled_key,
@@ -115,6 +116,7 @@ class StrategyConsumer:
                 raw = await self.redis.queue_pop(tick_queue(self.symbol), timeout=_POP_TIMEOUT)
 
                 await self._maybe_heartbeat()
+                await self._check_strategy_change()
 
                 if raw is None:
                     continue
@@ -129,6 +131,35 @@ class StrategyConsumer:
     # ------------------------------------------------------------------ #
     # 상태 복구 (재시작 시)
     # ------------------------------------------------------------------ #
+
+    async def _check_strategy_change(self) -> None:
+        """Redis에서 전략 변경 요청 확인 — 변경 시 엔진 동적 교체."""
+        requested = await self.redis.get(active_strategy_key(self.symbol))
+        if not requested or requested == self.strategy_name:
+            return
+
+        new_strategy = requested.strip()
+        params_cls = STRATEGY_PARAMS_MAP.get(new_strategy)
+        if params_cls is None:
+            logger.warning("[StrategyConsumer] 알 수 없는 전략 요청 무시: %s", new_strategy)
+            return
+
+        logger.info(
+            "[StrategyConsumer] 전략 교체: %s → %s",
+            self.strategy_name, new_strategy,
+        )
+        self.strategy_name = new_strategy
+        self.params = params_cls(symbol=self.symbol)
+
+        preset = BUILTIN_PRESETS.get((new_strategy, self.symbol), {})
+        if preset:
+            apply_preset_overrides(self.params, preset)
+
+        self.engine = _build_engine(new_strategy, self.params)
+        # 포지션 상태는 유지, 시그널/트레일링 스탑 초기화
+        self.trailing_stop = None
+        self._last_signal = "hold"
+        self._last_reason = "strategy_changed"
 
     async def _restore_state(self) -> None:
         """DB의 open positions에서 in_position 복구."""
