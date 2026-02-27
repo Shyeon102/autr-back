@@ -29,6 +29,7 @@ from autr.infra.db.factory import create_db
 from autr.infra.db.quant_store import QuantSQLiteStore
 from autr.infra.queue_keys import (
     SIGNAL_QUEUE,
+    active_strategy_key,
     strategy_state_key,
     tick_queue,
     trading_enabled_key,
@@ -115,6 +116,7 @@ class StrategyConsumer:
                 raw = await self.redis.queue_pop(tick_queue(self.symbol), timeout=_POP_TIMEOUT)
 
                 await self._maybe_heartbeat()
+                await self._check_strategy_change()
 
                 if raw is None:
                     continue
@@ -129,6 +131,35 @@ class StrategyConsumer:
     # ------------------------------------------------------------------ #
     # 상태 복구 (재시작 시)
     # ------------------------------------------------------------------ #
+
+    async def _check_strategy_change(self) -> None:
+        """Redis에서 전략 변경 요청 확인 — 변경 시 엔진 동적 교체."""
+        requested = await self.redis.get(active_strategy_key(self.symbol))
+        if not requested or requested == self.strategy_name:
+            return
+
+        new_strategy = requested.strip()
+        params_cls = STRATEGY_PARAMS_MAP.get(new_strategy)
+        if params_cls is None:
+            logger.warning("[StrategyConsumer] 알 수 없는 전략 요청 무시: %s", new_strategy)
+            return
+
+        logger.info(
+            "[StrategyConsumer] 전략 교체: %s → %s",
+            self.strategy_name, new_strategy,
+        )
+        self.strategy_name = new_strategy
+        self.params = params_cls(symbol=self.symbol)
+
+        preset = BUILTIN_PRESETS.get((new_strategy, self.symbol), {})
+        if preset:
+            apply_preset_overrides(self.params, preset)
+
+        self.engine = _build_engine(new_strategy, self.params)
+        # 포지션 상태는 유지, 시그널/트레일링 스탑 초기화
+        self.trailing_stop = None
+        self._last_signal = "hold"
+        self._last_reason = "strategy_changed"
 
     async def _restore_state(self) -> None:
         """DB의 open positions에서 in_position 복구."""
@@ -295,33 +326,36 @@ class StrategyConsumer:
 # Entrypoint
 # ------------------------------------------------------------------ #
 
+_DEFAULT_STRATEGY = "regime_trend"
+
+
 async def main() -> None:
     symbol = os.getenv("STRATEGY_SYMBOL", "BTCUSDT").upper()
-    strategy_name = os.getenv("TRADING_STRATEGY", "regime_trend").lower()
     redis_url = os.getenv("REDIS_URL", "")
     db_path = os.getenv("QUANT_DB_PATH", "./data/quant_timeseries.db")
     database_url = os.getenv("DATABASE_URL", "")
 
-    # 파라미터 클래스 선택
+    redis = create_redis_adapter(redis_url)
+
+    # 시작 전략: Redis에 저장된 값 우선, 없으면 기본값
+    strategy_name = await redis.get(active_strategy_key(symbol)) or _DEFAULT_STRATEGY
+    strategy_name = strategy_name.strip().lower()
+
     params_cls = STRATEGY_PARAMS_MAP.get(strategy_name)
     if params_cls is None:
-        raise ValueError(f"Unknown TRADING_STRATEGY: {strategy_name}")
+        logger.warning("[main] 알 수 없는 전략 '%s', 기본값 '%s' 사용", strategy_name, _DEFAULT_STRATEGY)
+        strategy_name = _DEFAULT_STRATEGY
+        params_cls = STRATEGY_PARAMS_MAP[strategy_name]
 
     params = params_cls(symbol=symbol)
 
-    # 빌트인 프리셋 오버라이드 적용
     preset = BUILTIN_PRESETS.get((strategy_name, symbol), {})
     if preset:
         apply_preset_overrides(params, preset)
-        logger.info(
-            "[main] 프리셋 적용: strategy=%s symbol=%s overrides=%s",
-            strategy_name, symbol, preset,
-        )
 
     logger.info("[main] strategy=%s symbol=%s params=%s", strategy_name, symbol, params.to_dict())
 
     store = QuantSQLiteStore(db_path)
-    redis = create_redis_adapter(redis_url)
     db = create_db(database_url)
 
     consumer = StrategyConsumer(
