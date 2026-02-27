@@ -6,7 +6,7 @@ Strategy Consumer — tick 큐 구독 → signal 큐 발행.
         ↓  BRPOP
   trading:enabled:{symbol} 확인 → 비활성이면 상태만 기록
         ↓  활성
-  RegimeTrendSignalEngine.decide()
+  선택된 SignalEngine.decide()
         ↓  signal 있으면
   queue:signals  (Executor Consumer 구독)
   state:strategy:{symbol}  (API 서버 상태 조회용)
@@ -35,8 +35,12 @@ from autr.infra.queue_keys import (
 )
 from autr.infra.redis import create_redis_adapter
 from autr.ops.heartbeat import record_heartbeat
-from autr.strategies.regime_trend_strategy import RegimeTrendSignalEngine
-from autr.strategies.strategy_params import RegimeTrendParams
+from autr.strategies.strategy_params import (
+    BUILTIN_PRESETS,
+    STRATEGY_PARAMS_MAP,
+    apply_preset_overrides,
+    DualTimeframeParams,
+)
 
 load_dotenv()
 logging.basicConfig(
@@ -51,6 +55,24 @@ _POP_TIMEOUT = 30
 _STATE_TTL = 300   # 5분 — consumer 중단 시 stale state 방지
 
 
+def _build_engine(strategy_name: str, params):
+    """전략 이름에 맞는 SignalEngine 반환."""
+    if strategy_name == "regime_trend":
+        from autr.strategies.regime_trend_strategy import RegimeTrendSignalEngine
+        return RegimeTrendSignalEngine(params)
+    elif strategy_name == "dual_timeframe":
+        from autr.strategies.dual_timeframe_strategy import DualTimeframeSignalEngine
+        return DualTimeframeSignalEngine(params)
+    elif strategy_name == "breakout_volume":
+        from autr.strategies.breakout_volume_strategy import BreakoutVolumeSignalEngine
+        return BreakoutVolumeSignalEngine(params)
+    elif strategy_name == "mean_reversion":
+        from autr.strategies.mean_reversion_strategy import MeanReversionSignalEngine
+        return MeanReversionSignalEngine(params)
+    else:
+        raise ValueError(f"Unknown strategy: {strategy_name}")
+
+
 class StrategyConsumer:
     """
     단일 심볼/전략 소비자.
@@ -59,13 +81,14 @@ class StrategyConsumer:
     - 매 tick마다 state:strategy 갱신 (API 서버 상태 조회용)
     """
 
-    def __init__(self, symbol: str, params: RegimeTrendParams, store: QuantSQLiteStore, redis, db):
+    def __init__(self, strategy_name: str, symbol: str, params, store: QuantSQLiteStore, redis, db):
+        self.strategy_name = strategy_name
         self.symbol = symbol
         self.params = params
         self.store = store
         self.redis = redis
         self.db = db
-        self.engine = RegimeTrendSignalEngine(params)
+        self.engine = _build_engine(strategy_name, params)
 
         self.in_position: bool = False
         self.trailing_stop: Optional[float] = None
@@ -83,8 +106,8 @@ class StrategyConsumer:
     async def run(self) -> None:
         await self._restore_state()
         logger.info(
-            "[StrategyConsumer] 시작: symbol=%s in_position=%s",
-            self.symbol, self.in_position,
+            "[StrategyConsumer] 시작: strategy=%s symbol=%s in_position=%s",
+            self.strategy_name, self.symbol, self.in_position,
         )
 
         while True:
@@ -129,24 +152,9 @@ class StrategyConsumer:
     async def _process_tick(self, tick: dict) -> None:
         symbol = tick.get("symbol", self.symbol)
 
-        rows = self.store.fetch_ohlcv(
-            symbol, "spot", self.params.interval, limit=self.params.lookback_bars
-        )
-        if len(rows) < 50:
-            logger.debug("[StrategyConsumer] 캔들 부족 (%d개)", len(rows))
+        decision = self._decide(symbol)
+        if decision is None:
             return
-
-        df = pd.DataFrame([dict(r) for r in rows]).sort_values("ts").reset_index(drop=True)
-        frame = self.engine.build_indicator_frame(df)
-        if frame.empty:
-            return
-
-        decision = self.engine.decide(
-            frame=frame,
-            in_position=self.in_position,
-            trailing_stop=self.trailing_stop,
-            bars_since_trade=self.bars_since_trade,
-        )
 
         self.bars_since_trade += 1
         self.trailing_stop = decision.trailing_stop
@@ -154,7 +162,6 @@ class StrategyConsumer:
         self._last_reason = decision.reason
         self._last_close = decision.close_price
 
-        # 거래 활성 여부 확인
         enabled = bool(await self.redis.get(trading_enabled_key(self.symbol)))
 
         if enabled:
@@ -163,7 +170,7 @@ class StrategyConsumer:
                 self.bars_since_trade = 0
                 await self._publish_signal("buy", decision.close_price)
                 logger.info(
-                    "[StrategyConsumer] BUY signal | %s close=%.4f reason=%s",
+                    "[StrategyConsumer] BUY | %s close=%.4f reason=%s",
                     symbol, decision.close_price, decision.reason,
                 )
             elif decision.signal == "sell" and self.in_position:
@@ -171,18 +178,83 @@ class StrategyConsumer:
                 self.bars_since_trade = 0
                 await self._publish_signal("sell", decision.close_price)
                 logger.info(
-                    "[StrategyConsumer] SELL signal | %s close=%.4f reason=%s",
+                    "[StrategyConsumer] SELL | %s close=%.4f reason=%s",
                     symbol, decision.close_price, decision.reason,
                 )
 
-        # 항상 상태 기록 (거래 활성 여부 무관)
         await self._write_state(enabled)
 
+    def _decide(self, symbol: str):
+        """전략별 decide() 호출 분기."""
+        if self.strategy_name == "dual_timeframe":
+            return self._decide_dual(symbol)
+        else:
+            return self._decide_single(symbol)
+
+    def _decide_single(self, symbol: str):
+        """regime_trend / breakout_volume / mean_reversion 공통 경로."""
+        interval = getattr(self.params, "interval", "15")
+        lookback = getattr(self.params, "lookback_bars", 260)
+
+        rows = self.store.fetch_ohlcv(symbol, "spot", interval, limit=lookback)
+        if len(rows) < 50:
+            logger.debug("[StrategyConsumer] 캔들 부족 (%d개)", len(rows))
+            return None
+
+        df = pd.DataFrame([dict(r) for r in rows]).sort_values("ts").reset_index(drop=True)
+        frame = self.engine.build_indicator_frame(df)
+        if frame.empty:
+            return None
+
+        return self.engine.decide(
+            frame=frame,
+            in_position=self.in_position,
+            trailing_stop=self.trailing_stop,
+            bars_since_trade=self.bars_since_trade,
+        )
+
+    def _decide_dual(self, symbol: str):
+        """dual_timeframe 전용 경로 — HTF + LTF 각각 fetch."""
+        params: DualTimeframeParams = self.params
+
+        # LTF 캔들
+        ltf_rows = self.store.fetch_ohlcv(
+            symbol, "spot", params.ltf_interval, limit=params.ltf_lookback_bars
+        )
+        if len(ltf_rows) < 50:
+            logger.debug("[StrategyConsumer] LTF 캔들 부족 (%d개)", len(ltf_rows))
+            return None
+
+        ltf_df = pd.DataFrame([dict(r) for r in ltf_rows]).sort_values("ts").reset_index(drop=True)
+        ltf_frame = self.engine.build_ltf_frame(ltf_df)
+        if ltf_frame.empty:
+            return None
+
+        # HTF 캔들
+        htf_rows = self.store.fetch_ohlcv(
+            symbol, "spot", params.htf_interval, limit=params.htf_ema_slow + 10
+        )
+        htf_df = (
+            pd.DataFrame([dict(r) for r in htf_rows]).sort_values("ts").reset_index(drop=True)
+            if htf_rows else pd.DataFrame()
+        )
+        htf_bullish, _ = self.engine.htf_is_bullish(htf_df) if not htf_df.empty else (False, {})
+        htf_sufficient = len(htf_rows) >= params.htf_ema_slow + 5
+
+        return self.engine.decide(
+            ltf_frame=ltf_frame,
+            htf_bullish=htf_bullish,
+            htf_data_sufficient=htf_sufficient,
+            in_position=self.in_position,
+            trailing_stop=self.trailing_stop,
+            bars_since_trade=self.bars_since_trade,
+        )
+
     async def _publish_signal(self, side: str, close_price: float) -> None:
-        sig_id = id_gen.signal_id("regime_trend", self.symbol)
+        sig_id = id_gen.signal_id(self.strategy_name, self.symbol)
         payload = json.dumps({
             "symbol": self.symbol,
-            "strategy": "regime_trend",
+            "strategy": self.strategy_name,
             "signal": side,
             "sig_id": sig_id,
             "close_price": close_price,
@@ -193,7 +265,7 @@ class StrategyConsumer:
         """API 서버 /trading/status 조회용 상태를 Redis에 기록."""
         state = {
             "symbol": self.symbol,
-            "strategy": "regime_trend",
+            "strategy": self.strategy_name,
             "is_active": True,
             "trading_enabled": trading_enabled,
             "in_position": self.in_position,
@@ -225,29 +297,41 @@ class StrategyConsumer:
 
 async def main() -> None:
     symbol = os.getenv("STRATEGY_SYMBOL", "BTCUSDT").upper()
+    strategy_name = os.getenv("TRADING_STRATEGY", "regime_trend").lower()
     redis_url = os.getenv("REDIS_URL", "")
     db_path = os.getenv("QUANT_DB_PATH", "./data/quant_timeseries.db")
     database_url = os.getenv("DATABASE_URL", "")
 
-    params = RegimeTrendParams(
-        symbol=symbol,
-        interval=os.getenv("STRATEGY_INTERVAL", "15"),
-        lookback_bars=int(os.getenv("STRATEGY_LOOKBACK_BARS", "260")),
-        ema_fast_period=int(os.getenv("STRATEGY_EMA_FAST", "50")),
-        ema_slow_period=int(os.getenv("STRATEGY_EMA_SLOW", "200")),
-        min_trend_gap_pct=float(os.getenv("STRATEGY_MIN_TREND_GAP_PCT", "0.001")),
-        atr_period=int(os.getenv("STRATEGY_ATR_PERIOD", "14")),
-        initial_stop_atr_mult=float(os.getenv("STRATEGY_INITIAL_STOP_ATR_MULT", "2.5")),
-        trailing_stop_atr_mult=float(os.getenv("STRATEGY_TRAILING_STOP_ATR_MULT", "3.0")),
-        loop_seconds=60,
-        cooldown_bars=int(os.getenv("STRATEGY_COOLDOWN_BARS", "2")),
-    )
+    # 파라미터 클래스 선택
+    params_cls = STRATEGY_PARAMS_MAP.get(strategy_name)
+    if params_cls is None:
+        raise ValueError(f"Unknown TRADING_STRATEGY: {strategy_name}")
+
+    params = params_cls(symbol=symbol)
+
+    # 빌트인 프리셋 오버라이드 적용
+    preset = BUILTIN_PRESETS.get((strategy_name, symbol), {})
+    if preset:
+        apply_preset_overrides(params, preset)
+        logger.info(
+            "[main] 프리셋 적용: strategy=%s symbol=%s overrides=%s",
+            strategy_name, symbol, preset,
+        )
+
+    logger.info("[main] strategy=%s symbol=%s params=%s", strategy_name, symbol, params.to_dict())
 
     store = QuantSQLiteStore(db_path)
     redis = create_redis_adapter(redis_url)
     db = create_db(database_url)
 
-    consumer = StrategyConsumer(symbol=symbol, params=params, store=store, redis=redis, db=db)
+    consumer = StrategyConsumer(
+        strategy_name=strategy_name,
+        symbol=symbol,
+        params=params,
+        store=store,
+        redis=redis,
+        db=db,
+    )
     await consumer.run()
 
 
