@@ -326,33 +326,36 @@ class StrategyConsumer:
 # Entrypoint
 # ------------------------------------------------------------------ #
 
+_DEFAULT_STRATEGY = "regime_trend"
+
+
 async def main() -> None:
     symbol = os.getenv("STRATEGY_SYMBOL", "BTCUSDT").upper()
-    strategy_name = os.getenv("TRADING_STRATEGY", "regime_trend").lower()
     redis_url = os.getenv("REDIS_URL", "")
     db_path = os.getenv("QUANT_DB_PATH", "./data/quant_timeseries.db")
     database_url = os.getenv("DATABASE_URL", "")
 
-    # 파라미터 클래스 선택
+    redis = create_redis_adapter(redis_url)
+
+    # 시작 전략: Redis에 저장된 값 우선, 없으면 기본값
+    strategy_name = await redis.get(active_strategy_key(symbol)) or _DEFAULT_STRATEGY
+    strategy_name = strategy_name.strip().lower()
+
     params_cls = STRATEGY_PARAMS_MAP.get(strategy_name)
     if params_cls is None:
-        raise ValueError(f"Unknown TRADING_STRATEGY: {strategy_name}")
+        logger.warning("[main] 알 수 없는 전략 '%s', 기본값 '%s' 사용", strategy_name, _DEFAULT_STRATEGY)
+        strategy_name = _DEFAULT_STRATEGY
+        params_cls = STRATEGY_PARAMS_MAP[strategy_name]
 
     params = params_cls(symbol=symbol)
 
-    # 빌트인 프리셋 오버라이드 적용
     preset = BUILTIN_PRESETS.get((strategy_name, symbol), {})
     if preset:
         apply_preset_overrides(params, preset)
-        logger.info(
-            "[main] 프리셋 적용: strategy=%s symbol=%s overrides=%s",
-            strategy_name, symbol, preset,
-        )
 
     logger.info("[main] strategy=%s symbol=%s params=%s", strategy_name, symbol, params.to_dict())
 
     store = QuantSQLiteStore(db_path)
-    redis = create_redis_adapter(redis_url)
     db = create_db(database_url)
 
     consumer = StrategyConsumer(
