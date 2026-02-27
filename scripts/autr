@@ -86,8 +86,12 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     -s|--strategy)
       STRATEGY=$(_strategy_name "${2:-}")
+      echo "⏹️  자동매매 중지"
+      _post "/trading/stop" > /dev/null
       echo "🔄 전략 변경 → $STRATEGY"
       _post "/trading/strategy" "{\"strategy\": \"$STRATEGY\"}"
+      echo "▶️  자동매매 시작"
+      _post "/trading/start"
       shift 2
       ;;
     -t|--trade)
