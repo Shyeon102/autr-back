@@ -1,0 +1,130 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────
+#  autr — Auto Trading CLI
+#  Usage: autr [--status] [--trade start|stop]
+#              [--strategy regime|dual|breakout|mean]
+#              [--assets]
+# ─────────────────────────────────────────────
+set -euo pipefail
+
+# ── Config ────────────────────────────────────
+AUTR_DIR="${AUTR_DIR:-$HOME/auto-trading-backend}"
+ENV_FILE="$AUTR_DIR/.env"
+API_BASE="${AUTR_API:-https://api.dataquantlab.com/api}"
+
+# .env 파일에서 API 키 로드
+if [[ -f "$ENV_FILE" ]]; then
+  API_KEY=$(grep -E '^ADMIN_API_KEY=' "$ENV_FILE" | cut -d= -f2 | tr -d '"' | tr -d "'")
+fi
+API_KEY="${API_KEY:-${ADMIN_API_KEY:-}}"
+
+# ── Helpers ───────────────────────────────────
+_json() {
+  python3 -m json.tool 2>/dev/null || cat
+}
+
+_get() {
+  curl -sf "$API_BASE$1" | _json
+}
+
+_post() {
+  local path="$1"
+  local body="${2:-}"
+  if [[ -n "$body" ]]; then
+    curl -sf -X POST "$API_BASE$path" \
+      -H "X-API-KEY: $API_KEY" \
+      -H "Content-Type: application/json" \
+      -d "$body" | _json
+  else
+    curl -sf -X POST "$API_BASE$path" \
+      -H "X-API-KEY: $API_KEY" | _json
+  fi
+}
+
+_strategy_name() {
+  case "$1" in
+    regime)   echo "regime_trend" ;;
+    dual)     echo "dual_timeframe" ;;
+    breakout) echo "breakout_volume" ;;
+    mean)     echo "mean_reversion" ;;
+    *)
+      echo "❌ 알 수 없는 전략: $1"
+      echo "   사용 가능: regime | dual | breakout | mean"
+      exit 1
+      ;;
+  esac
+}
+
+_usage() {
+  cat <<EOF
+Usage: autr [OPTIONS]
+
+Options:
+  -s, --strategy <name>   전략 변경 (regime|dual|breakout|mean)
+  -t, --trade <action>    자동매매 시작/중지 (start|stop)
+      --status            현재 전략 상태 조회
+  -a, --assets            현재 잔고 조회
+  -h, --help              도움말
+
+Examples:
+  autr --status
+  autr --trade start
+  autr --trade stop
+  autr --strategy dual
+  autr --assets
+EOF
+}
+
+# ── 인자 없으면 status 보여주기 ────────────────
+if [[ $# -eq 0 ]]; then
+  _get "/trading/status"
+  exit 0
+fi
+
+# ── 인자 파싱 ─────────────────────────────────
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -s|--strategy)
+      STRATEGY=$(_strategy_name "${2:-}")
+      echo "🔄 전략 변경 → $STRATEGY"
+      _post "/trading/strategy" "{\"strategy\": \"$STRATEGY\"}"
+      shift 2
+      ;;
+    -t|--trade)
+      ACTION="${2:-}"
+      case "$ACTION" in
+        start)
+          echo "▶️  자동매매 시작"
+          _post "/trading/start"
+          ;;
+        stop)
+          echo "⏹️  자동매매 중지"
+          _post "/trading/stop"
+          ;;
+        *)
+          echo "❌ 알 수 없는 액션: $ACTION"
+          echo "   사용 가능: start | stop"
+          exit 1
+          ;;
+      esac
+      shift 2
+      ;;
+    --status)
+      _get "/trading/status"
+      shift
+      ;;
+    -a|--assets)
+      _get "/portfolio"
+      shift
+      ;;
+    -h|--help)
+      _usage
+      exit 0
+      ;;
+    *)
+      echo "❌ 알 수 없는 옵션: $1"
+      _usage
+      exit 1
+      ;;
+  esac
+done
