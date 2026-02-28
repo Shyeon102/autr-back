@@ -237,12 +237,22 @@ class StrategyConsumer:
         if frame.empty:
             return None
 
-        return self.engine.decide(
-            frame=frame,
-            in_position=self.in_position,
-            trailing_stop=self.trailing_stop,
-            bars_since_trade=self.bars_since_trade,
-        )
+        # MeanReversionSignalEngine.decide()는 stop_price 파라미터 사용
+        # (trailing_stop이 아님 — 시그니처가 다름)
+        if self.strategy_name == "mean_reversion":
+            return self.engine.decide(
+                frame=frame,
+                in_position=self.in_position,
+                stop_price=self.trailing_stop,
+                bars_since_trade=self.bars_since_trade,
+            )
+        else:
+            return self.engine.decide(
+                frame=frame,
+                in_position=self.in_position,
+                trailing_stop=self.trailing_stop,
+                bars_since_trade=self.bars_since_trade,
+            )
 
     def _decide_dual(self, symbol: str):
         """dual_timeframe 전용 경로 — HTF + LTF 각각 fetch."""
