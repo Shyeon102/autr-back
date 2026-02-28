@@ -188,7 +188,8 @@ class StrategyConsumer:
             return
 
         self.bars_since_trade += 1
-        self.trailing_stop = decision.trailing_stop
+        # MeanReversion의 SignalDecision은 stop_price 필드 사용 (trailing_stop 없음)
+        self.trailing_stop = getattr(decision, "trailing_stop", None) or getattr(decision, "stop_price", None)
         self._last_signal = decision.signal
         self._last_reason = decision.reason
         self._last_close = decision.close_price
