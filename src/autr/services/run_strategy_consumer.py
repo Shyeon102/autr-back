@@ -26,7 +26,7 @@ from dotenv import load_dotenv
 
 from autr.domain import ids as id_gen
 from autr.infra.db.factory import create_db
-from autr.infra.db.quant_store import QuantSQLiteStore
+from autr.infra.db.quant_store import create_quant_store
 from autr.infra.queue_keys import (
     SIGNAL_QUEUE,
     active_strategy_key,
@@ -193,6 +193,21 @@ class StrategyConsumer:
         self._last_signal = decision.signal
         self._last_reason = decision.reason
         self._last_close = decision.close_price
+
+        # signal_log 기록 (매 틱 — 전략 분석용)
+        try:
+            await self.db.add_signal_log(
+                symbol=symbol,
+                strategy=self.strategy_name,
+                signal=decision.signal,
+                reason=decision.reason,
+                indicators={"close": decision.close_price},
+                trailing_stop=self.trailing_stop,
+                in_position=self.in_position,
+                params=self.params.to_dict() if hasattr(self.params, "to_dict") else {},
+            )
+        except Exception as _sl_err:
+            logger.debug("[StrategyConsumer] signal_log 기록 실패: %s", _sl_err)
 
         enabled = bool(await self.redis.get(trading_enabled_key(self.symbol)))
 
@@ -366,7 +381,7 @@ async def main() -> None:
 
     logger.info("[main] strategy=%s symbol=%s params=%s", strategy_name, symbol, params.to_dict())
 
-    store = QuantSQLiteStore(db_path)
+    store = create_quant_store(database_url=database_url, db_path=db_path)
     db = create_db(database_url)
 
     consumer = StrategyConsumer(

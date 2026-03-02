@@ -7,13 +7,13 @@ import numpy as np
 import pandas as pd
 
 from autr.infra.bybit.client import BybitClient
-from autr.infra.db.quant_store import QuantSQLiteStore
+from autr.infra.db.quant_store import QuantSQLiteStore, QuantPostgresStore
 
 logger = logging.getLogger(__name__)
 
 
 class QuantDataCollector:
-    def __init__(self, client: BybitClient, store: QuantSQLiteStore):
+    def __init__(self, client: BybitClient, store):
         self.client = client
         self.store = store
 
