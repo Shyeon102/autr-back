@@ -298,21 +298,27 @@ class QuantPostgresStore:
     """
     PostgreSQL 기반 Quant 시계열 저장소.
     QuantSQLiteStore와 동일한 인터페이스 제공 (psycopg2 sync 백엔드).
+    ThreadedConnectionPool로 커넥션 재사용 — 매 호출마다 connect/close 하지 않음.
     """
 
-    def __init__(self, database_url: str):
+    def __init__(self, database_url: str, minconn: int = 1, maxconn: int = 5):
+        import psycopg2.pool
         self._url = database_url
+        self._pool = psycopg2.pool.ThreadedConnectionPool(
+            minconn=minconn,
+            maxconn=maxconn,
+            dsn=database_url,
+        )
         self._init_schema()
 
-    def _connect(self):
-        import psycopg2
-        import psycopg2.extras
-        conn = psycopg2.connect(self._url)
-        return conn
+    def _get_conn(self):
+        return self._pool.getconn()
+
+    def _put_conn(self, conn, close: bool = False):
+        self._pool.putconn(conn, close=close)
 
     def _init_schema(self):
-        import psycopg2
-        conn = self._connect()
+        conn = self._get_conn()
         try:
             with conn.cursor() as cur:
                 for stmt in POSTGRES_SCHEMA_SQL.split(";"):
@@ -321,7 +327,7 @@ class QuantPostgresStore:
                         cur.execute(stmt)
             conn.commit()
         finally:
-            conn.close()
+            self._put_conn(conn)
 
     def insert_many(self, sql: str, rows: Iterable[Dict[str, Any]]):
         import psycopg2.extras
@@ -336,17 +342,20 @@ class QuantPostgresStore:
         if "ON CONFLICT" not in pg_sql.upper():
             pg_sql = pg_sql.rstrip().rstrip(";") + " ON CONFLICT DO NOTHING"
 
-        conn = self._connect()
+        conn = self._get_conn()
         try:
             with conn.cursor() as cur:
                 psycopg2.extras.execute_batch(cur, pg_sql, rows)
             conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
         finally:
-            conn.close()
+            self._put_conn(conn)
 
     def fetch_ohlcv(self, symbol: str, market_type: str, timeframe: str, limit: int = 400) -> List[Dict]:
         import psycopg2.extras
-        conn = self._connect()
+        conn = self._get_conn()
         try:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 cur.execute(
@@ -361,10 +370,10 @@ class QuantPostgresStore:
                 )
                 return cur.fetchall()
         finally:
-            conn.close()
+            self._put_conn(conn)
 
     def start_run(self) -> int:
-        conn = self._connect()
+        conn = self._get_conn()
         try:
             with conn.cursor() as cur:
                 cur.execute(
@@ -373,11 +382,14 @@ class QuantPostgresStore:
                 run_id = cur.fetchone()[0]
             conn.commit()
             return int(run_id)
+        except Exception:
+            conn.rollback()
+            raise
         finally:
-            conn.close()
+            self._put_conn(conn)
 
     def end_run(self, run_id: int, status: str, message: str):
-        conn = self._connect()
+        conn = self._get_conn()
         try:
             with conn.cursor() as cur:
                 cur.execute(
@@ -385,8 +397,11 @@ class QuantPostgresStore:
                     (status, message, run_id),
                 )
             conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
         finally:
-            conn.close()
+            self._put_conn(conn)
 
 
 # ── Factory ──────────────────────────────────────────────────────────────────
