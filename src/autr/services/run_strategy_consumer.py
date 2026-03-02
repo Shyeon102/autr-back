@@ -82,7 +82,7 @@ class StrategyConsumer:
     - 매 tick마다 state:strategy 갱신 (API 서버 상태 조회용)
     """
 
-    def __init__(self, strategy_name: str, symbol: str, params, store: QuantSQLiteStore, redis, db):
+    def __init__(self, strategy_name: str, symbol: str, params, store, redis, db):
         self.strategy_name = strategy_name
         self.symbol = symbol
         self.params = params
