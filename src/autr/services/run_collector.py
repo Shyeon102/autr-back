@@ -14,7 +14,7 @@ from typing import List
 from dotenv import load_dotenv
 
 from autr.infra.bybit.client import BybitClient
-from autr.infra.db.quant_store import QuantSQLiteStore
+from autr.infra.db.quant_store import create_quant_store
 from autr.infra.queue_keys import tick_queue
 from autr.infra.redis import create_redis_adapter
 from autr.ops.heartbeat import record_heartbeat
@@ -30,7 +30,7 @@ def _parse_list(value: str, default: List[str]) -> List[str]:
     return items or default
 
 
-def _latest_tick(store: QuantSQLiteStore, symbol: str) -> dict | None:
+def _latest_tick(store, symbol: str) -> dict | None:
     """수집된 1분봉 최신 캔들을 반환."""
     rows = store.fetch_ohlcv(symbol, "spot", "1", limit=1)
     if not rows:
@@ -52,7 +52,8 @@ async def _async_main(args, symbols, timeframes, db_path, redis_url, max_workers
     logger = logging.getLogger("quant-pipeline")
 
     client = BybitClient()
-    store = QuantSQLiteStore(db_path)
+    database_url = os.getenv("DATABASE_URL", "")
+    store = create_quant_store(database_url=database_url, db_path=db_path)
     collector = QuantDataCollector(client, store)
     redis = create_redis_adapter(redis_url)
 
