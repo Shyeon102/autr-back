@@ -8,7 +8,7 @@
 set -euo pipefail
 
 # ── Config ────────────────────────────────────
-AUTR_DIR="${AUTR_DIR:-$HOME/auto-trading-backend}"
+AUTR_DIR="${AUTR_DIR:-$HOME/auto-trading}"
 ENV_FILE="$AUTR_DIR/.env"
 API_BASE="${AUTR_API:-https://api.dataquantlab.com/api}"
 
