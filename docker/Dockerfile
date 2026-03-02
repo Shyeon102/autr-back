@@ -1,7 +1,7 @@
 FROM python:3.12-slim
 
 WORKDIR /app
-COPY pyproject.toml README.md /app/
+COPY pyproject.toml README.md alembic.ini /app/
 COPY src /app/src
 COPY scripts /app/scripts
 COPY docker /app/docker
