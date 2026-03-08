@@ -264,7 +264,8 @@ class Executor:
     async def _get_exchange_qty(self, symbol: str) -> float:
         try:
             balance = await self.client.get_balance()
-            asset_data = balance.get(symbol, {})
-            return float(asset_data.get("total_quantity", 0.0))
+            base_currency = symbol.replace("USDT", "")  # "XRPUSDT" → "XRP"
+            asset_data = balance.get(base_currency, {})
+            return float(asset_data.get("balance", 0.0))
         except Exception:
             return 0.0
