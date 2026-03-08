@@ -1,4 +1,5 @@
 import os
+import math
 import logging
 import asyncio
 from typing import Dict, Any, Optional
@@ -176,10 +177,12 @@ class BybitClient:
                     logger.warning("주문 금액이 너무 작음: $%.2f", max_buy_amount)
                     return None
                 
-                # 심볼별 정밀도 조정
+                # 심볼별 정밀도 조정 — 잔고 초과 방지를 위해 내림(floor)
                 precision = self._get_symbol_precision(symbol)
-                return f"{crypto_qty:.{precision}f}"
-                
+                factor = 10 ** precision
+                floored_qty = math.floor(crypto_qty * factor) / factor
+                return f"{floored_qty:.{precision}f}"
+
             else:  # Sell
                 # 매도: 해당 암호화폐 잔고 기준으로 계산
                 base_currency = symbol.replace("USDT", "")
@@ -187,10 +190,12 @@ class BybitClient:
                 if crypto_balance <= 0:
                     logger.warning("매도할 %s가 없습니다", base_currency)
                     return None
-                
-                # 전체 암호화폐 매도
+
+                # 전체 암호화폐 매도 — 반올림하면 잔고 초과 → 항상 내림(floor)
                 precision = self._get_symbol_precision(symbol)
-                return f"{crypto_balance:.{precision}f}"
+                factor = 10 ** precision
+                floored_balance = math.floor(crypto_balance * factor) / factor
+                return f"{floored_balance:.{precision}f}"
                 
         except Exception as e:
             logger.warning("주문 크기 계산 오류 (%s): %s", symbol, e)
