@@ -96,11 +96,12 @@ class Executor:
                 logger.error("[Executor] 매수 주문 실패: %s", order_result.get("error"))
                 return {"success": False, "reason": "order_failed", "error": order_result.get("error")}
 
-            # 5. Trade 기록
+            # 5. Trade 기록 — 실제 체결 수량 사용
+            filled_qty = order_result.get("filled_qty") or float(safe_qty)
             await self.db.add_trade(
                 symbol=symbol,
                 side="Buy",
-                qty=float(safe_qty),
+                qty=filled_qty,
                 price=close_price,
                 signal=f"executor_buy:{strategy}:{sig_id}",
                 status="filled",
@@ -112,13 +113,13 @@ class Executor:
 
             # 7. Discord 알림
             await _notify(
-                f"✅ [{symbol}] BUY 체결 | strategy={strategy} qty={safe_qty} price={close_price:.4f}"
+                f"✅ [{symbol}] BUY 체결 | strategy={strategy} qty={filled_qty:.4f} price={close_price:.4f}"
             )
 
-            logger.info("[Executor] BUY 완료 symbol=%s qty=%s price=%.4f", symbol, safe_qty, close_price)
+            logger.info("[Executor] BUY 완료 symbol=%s filled_qty=%.6f price=%.4f", symbol, filled_qty, close_price)
             return {
                 "success": True,
-                "qty": safe_qty,
+                "qty": filled_qty,
                 "price": close_price,
                 "order_id": order_result.get("order_id"),
             }
@@ -158,27 +159,38 @@ class Executor:
                 logger.error("[Executor] 매도 주문 실패: %s", order_result.get("error"))
                 return {"success": False, "reason": "order_failed", "error": order_result.get("error")}
 
-            sold_qty = float(qty) if qty else 0.0
+            # 실제 체결 수량 사용
+            filled_qty = order_result.get("filled_qty") or (float(qty) if qty else 0.0)
             await self.db.add_trade(
                 symbol=symbol,
                 side="Sell",
-                qty=sold_qty,
+                qty=filled_qty,
                 price=close_price,
                 signal=f"executor_sell:{strategy}:{sig_id}",
                 status="filled",
                 order_id=order_result.get("order_id"),
             )
 
+            # 열린 포지션 모두 닫기 (전량 매도 기준)
+            try:
+                open_positions = await self.db.get_positions(status="open", symbol=symbol)
+                for pos in open_positions:
+                    await self.db.close_position(pos["id"], close_price)
+                if open_positions:
+                    logger.info("[Executor] 포지션 %d개 DB 종료: %s", len(open_positions), symbol)
+            except Exception as _pe:
+                logger.warning("[Executor] 포지션 종료 DB 기록 실패: %s", _pe)
+
             await self.redis.mark_processed(sig_id, ttl=_PROCESSED_TTL)
 
             await _notify(
-                f"✅ [{symbol}] SELL 체결 | strategy={strategy} qty={sold_qty} price={close_price:.4f}"
+                f"✅ [{symbol}] SELL 체결 | strategy={strategy} qty={filled_qty:.4f} price={close_price:.4f}"
             )
 
-            logger.info("[Executor] SELL 완료 symbol=%s qty=%s price=%.4f", symbol, sold_qty, close_price)
+            logger.info("[Executor] SELL 완료 symbol=%s filled_qty=%.6f price=%.4f", symbol, filled_qty, close_price)
             return {
                 "success": True,
-                "qty": sold_qty,
+                "qty": filled_qty,
                 "price": close_price,
                 "order_id": order_result.get("order_id"),
             }
@@ -236,15 +248,28 @@ class Executor:
                 return {"action": "open_missing_local", "symbol": symbol, "exchange_qty": exchange_qty}
 
             else:
-                # adjust_qty
+                # adjust_qty — 거래소 기준으로 로컬 DB 동기화
                 logger.warning(
-                    "[Executor] Reconcile: qty 불일치 local=%.6f exchange=%.6f: %s",
+                    "[Executor] Reconcile: qty 불일치 local=%.6f exchange=%.6f → DB 동기화: %s",
                     local_qty,
                     exchange_qty,
                     symbol,
                 )
                 await _notify(
-                    f"⚠️ [{symbol}] Reconcile: qty 불일치 local={local_qty:.6f} exchange={exchange_qty:.6f}"
+                    f"⚠️ [{symbol}] Reconcile: qty 불일치 local={local_qty:.6f} exchange={exchange_qty:.6f} → DB 동기화"
+                )
+                # 기존 열린 포지션 전부 닫기
+                current_price = await self.client.get_current_price(symbol)
+                open_positions = await self.db.get_positions(status="open", symbol=symbol)
+                for pos in open_positions:
+                    await self.db.close_position(pos["id"], float(current_price))
+                # 거래소 실제 수량으로 새 포지션 생성
+                await self.db.create_position(
+                    symbol=symbol,
+                    position_type="long",
+                    entry_price=float(current_price),
+                    quantity=exchange_qty,
+                    dollar_amount=exchange_qty * float(current_price),
                 )
                 return {
                     "action": "adjust_qty",

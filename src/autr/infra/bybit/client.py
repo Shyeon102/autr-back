@@ -266,10 +266,14 @@ class BybitClient:
             )
             
             if response["retCode"] == 0:
-                logger.info("주문 성공: %s %s %s ($%.2f)", side, qty, symbol, order_value)
+                order_id = response["result"]["orderId"]
+                # 실제 체결 수량 조회 (market order는 즉시 체결이지만 cumExecQty는 order 조회 필요)
+                filled_qty = await self._get_filled_qty(symbol, order_id, requested_qty=float(qty or 0))
+                logger.info("주문 성공: %s %s %s ($%.2f) 실체결=%.6f", side, qty, symbol, order_value, filled_qty)
                 return {
                     "success": True,
-                    "order_id": response["result"]["orderId"],
+                    "order_id": order_id,
+                    "filled_qty": filled_qty,
                     "data": response["result"]
                 }
             else:
@@ -280,6 +284,25 @@ class BybitClient:
             logger.error("주문 실행 오류: %s", e)
             return {"success": False, "error": str(e)}
     
+    async def _get_filled_qty(self, symbol: str, order_id: str, requested_qty: float) -> float:
+        """주문 ID로 실제 체결 수량 조회. 조회 실패 시 requested_qty 반환."""
+        try:
+            await asyncio.sleep(0.5)  # 체결 완료 대기
+            response = await self._call(
+                self.session.get_order_history,
+                category="spot",
+                symbol=symbol,
+                orderId=order_id,
+                limit=1,
+            )
+            if response["retCode"] == 0 and response["result"]["list"]:
+                order = response["result"]["list"][0]
+                cum_exec = float(order.get("cumExecQty", 0) or 0)
+                return cum_exec if cum_exec > 0 else requested_qty
+        except Exception as e:
+            logger.warning("체결 수량 조회 실패 (%s): %s", order_id, e)
+        return requested_qty
+
     async def get_order_history(self, symbol: str = "BTCUSDT", limit: int = 50) -> list:
         """주문 내역 조회"""
         if not self.authenticated:
