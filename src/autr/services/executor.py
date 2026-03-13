@@ -77,14 +77,20 @@ class Executor:
                 logger.info("[Executor] 중복 signal_id 스킵: %s", sig_id)
                 return {"success": False, "reason": "duplicate_signal"}
 
-            # 2. 수량 계산
+            # 2. 이미 포지션 보유 중이면 매수 스킵 (SELL 완료 후에만 BUY 허용)
+            open_positions = await self.db.get_positions(status="open", symbol=symbol)
+            if open_positions:
+                held_qty = sum(float(p.get("quantity", 0)) for p in open_positions)
+                logger.warning("[Executor] 이미 포지션 보유 중, 매수 스킵: %s (qty=%.4f)", symbol, held_qty)
+                return {"success": False, "reason": "position_already_open"}
+
+            # 3. 수량 계산
             safe_qty = await self.client.calculate_safe_order_size(symbol, "Buy")
             if not safe_qty:
-                logger.warning("[Executor] 안전 매수 수량 없음: %s", symbol)
+                err = f"[{symbol}] 매수 수량 계산 실패 (USDT 잔고 부족 또는 최소 주문 미달)"
+                logger.warning("[Executor] %s", err)
+                await _notify(f"❌ {err}")
                 return {"success": False, "reason": "no_safe_qty"}
-
-            # 3. 상태 전이: NONE → ENTERING
-            # (포지션 상태는 position_service와 협력)
 
             # 4. 주문 실행
             order_result = await self.client.place_order(
@@ -93,8 +99,10 @@ class Executor:
                 qty=safe_qty,
             )
             if not order_result.get("success"):
-                logger.error("[Executor] 매수 주문 실패: %s", order_result.get("error"))
-                return {"success": False, "reason": "order_failed", "error": order_result.get("error")}
+                err = order_result.get("error", "unknown")
+                logger.error("[Executor] 매수 주문 실패: %s", err)
+                await _notify(f"❌ [{symbol}] BUY 실패 | strategy={strategy}\n오류: {err}")
+                return {"success": False, "reason": "order_failed", "error": err}
 
             # 5. Trade 기록 — 실제 체결 수량 사용
             filled_qty = order_result.get("filled_qty") or float(safe_qty)
@@ -150,14 +158,23 @@ class Executor:
                 logger.info("[Executor] 중복 signal_id 스킵: %s", sig_id)
                 return {"success": False, "reason": "duplicate_signal"}
 
+            # PnL 계산용: 주문 전에 열린 포지션 조회
+            open_positions_before = await self.db.get_positions(status="open", symbol=symbol)
+            total_invested = sum(
+                float(p.get("dollar_amount") or 0) or float(p.get("entry_price", 0)) * float(p.get("quantity", 0))
+                for p in open_positions_before
+            )
+
             order_result = await self.client.place_order(
                 symbol=symbol,
                 side="Sell",
                 qty=qty,
             )
             if not order_result.get("success"):
-                logger.error("[Executor] 매도 주문 실패: %s", order_result.get("error"))
-                return {"success": False, "reason": "order_failed", "error": order_result.get("error")}
+                err = order_result.get("error", "unknown")
+                logger.error("[Executor] 매도 주문 실패: %s", err)
+                await _notify(f"❌ [{symbol}] SELL 실패 | strategy={strategy}\n오류: {err}")
+                return {"success": False, "reason": "order_failed", "error": err}
 
             # 실제 체결 수량 사용
             filled_qty = order_result.get("filled_qty") or (float(qty) if qty else 0.0)
@@ -183,16 +200,29 @@ class Executor:
 
             await self.redis.mark_processed(sig_id, ttl=_PROCESSED_TTL)
 
+            # 손익 계산 및 Discord 알림
+            sell_value = filled_qty * close_price
+            pnl = sell_value - total_invested
+            pnl_pct = (pnl / total_invested * 100) if total_invested > 0 else 0.0
+            pnl_sign = "+" if pnl >= 0 else ""
+            pnl_emoji = "🟢" if pnl >= 0 else "🔴"
             await _notify(
-                f"✅ [{symbol}] SELL 체결 | strategy={strategy} qty={filled_qty:.4f} price={close_price:.4f}"
+                f"✅ [{symbol}] SELL 체결 | strategy={strategy}\n"
+                f"qty={filled_qty:.4f} @ {close_price:.4f}\n"
+                f"{pnl_emoji} 손익: {pnl_sign}{pnl:.4f} USDT ({pnl_sign}{pnl_pct:.2f}%)"
             )
 
-            logger.info("[Executor] SELL 완료 symbol=%s filled_qty=%.6f price=%.4f", symbol, filled_qty, close_price)
+            logger.info(
+                "[Executor] SELL 완료 symbol=%s filled_qty=%.6f price=%.4f pnl=%.4f(%.2f%%)",
+                symbol, filled_qty, close_price, pnl, pnl_pct,
+            )
             return {
                 "success": True,
                 "qty": filled_qty,
                 "price": close_price,
                 "order_id": order_result.get("order_id"),
+                "pnl": pnl,
+                "pnl_pct": pnl_pct,
             }
 
         finally:

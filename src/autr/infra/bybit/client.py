@@ -242,12 +242,13 @@ class BybitClient:
             current_price = await self.get_current_price(symbol)
             order_value = float(qty) * current_price
             
-            if order_value > self.max_trade_amount:
+            # 최대 한도 체크는 BUY에만 적용 — SELL은 보유 수량 전액 매도 허용
+            if side == "Buy" and order_value > self.max_trade_amount:
                 return {
-                    "success": False, 
+                    "success": False,
                     "error": f"주문 금액이 최대 한도를 초과합니다: ${order_value:.2f} > ${self.max_trade_amount}"
                 }
-            
+
             if order_value < self.min_order_size:
                 return {
                     "success": False,
