@@ -1,6 +1,5 @@
 services:
   api:
-    image: ghcr.io/shyeon102/autr-back:latest
     build:
       context: ..
       dockerfile: docker/Dockerfile
@@ -49,7 +48,7 @@ services:
       retries: 5
 
   collector:
-    image: ghcr.io/shyeon102/autr-back:latest  # ← 추가
+      # ← 추가
     build:
       context: ..
       dockerfile: docker/Dockerfile
@@ -64,7 +63,6 @@ services:
         condition: service_healthy
 
   strategy_consumer:
-    image: ghcr.io/shyeon102/autr-back:latest
     build:
       context: ..
       dockerfile: docker/Dockerfile
@@ -81,7 +79,7 @@ services:
         condition: service_started
 
   executor_consumer:
-    image: ghcr.io/shyeon102/autr-back:latest  # ← 추가
+      # ← 추가
     build:
       context: ..
       dockerfile: docker/Dockerfile
@@ -96,7 +94,7 @@ services:
         condition: service_healthy
 
   watchdog:
-    image: ghcr.io/shyeon102/autr-back:latest  # ← 추가
+      # ← 추가
     build:
       context: ..
       dockerfile: docker/Dockerfile

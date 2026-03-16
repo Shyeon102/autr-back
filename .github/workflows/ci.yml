@@ -54,26 +54,10 @@ jobs:
 
   deploy:
     runs-on: ubuntu-latest
-    needs: test                          # test job 통과해야만 실행
-    if: github.ref == 'refs/heads/main'  # main 브랜치 push일 때만
+    needs: test
+    if: github.ref == 'refs/heads/main'
 
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Build and push Docker image
-        run: |
-          REPO=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
-          
-          echo "${{ secrets.GITHUB_TOKEN }}" | \
-          docker login ghcr.io -u ${{ github.actor }} --password-stdin
-
-          docker build \
-            -t ghcr.io/${REPO}:${{ github.sha }} \
-            -t ghcr.io/${REPO}:latest \
-            -f docker/Dockerfile .
-
-          docker push ghcr.io/${REPO}:latest
-
       - name: Deploy to EC2
         uses: appleboy/ssh-action@v1
         with:
@@ -82,12 +66,8 @@ jobs:
           key: ${{ secrets.EC2_SSH_KEY }}
           script: |
             cd /home/ubuntu/auto-trading
-
-            echo "${{ secrets.GITHUB_TOKEN }}" | \
-            docker login ghcr.io -u ${{ github.actor }} --password-stdin
-
-            docker compose -f docker/docker-compose.yml pull
+            git pull origin main
+            docker compose -f docker/docker-compose.yml build
             docker compose -f docker/docker-compose.yml up -d --remove-orphans
             docker image prune -f
-
             echo "✅ 배포 완료"
