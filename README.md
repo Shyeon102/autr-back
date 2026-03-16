@@ -1,4 +1,4 @@
-# autr-back
+# auto trading system
 
 Auto-trading backend refactored into a layered `src/autr` architecture.
 
