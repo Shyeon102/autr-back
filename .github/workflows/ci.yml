@@ -58,15 +58,17 @@ jobs:
 
       - name: Build and push Docker image
         run: |
+          REPO=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+          
           echo "${{ secrets.GITHUB_TOKEN }}" | \
           docker login ghcr.io -u ${{ github.actor }} --password-stdin
 
           docker build \
-            -t ghcr.io/${{ github.repository }}:${{ github.sha }} \
-            -t ghcr.io/${{ github.repository }}:latest \
+            -t ghcr.io/${REPO}:${{ github.sha }} \
+            -t ghcr.io/${REPO}:latest \
             -f docker/Dockerfile .
 
-          docker push ghcr.io/${{ github.repository }}:latest
+          docker push ghcr.io/${REPO}:latest
 
       - name: Deploy to EC2
         uses: appleboy/ssh-action@v1
