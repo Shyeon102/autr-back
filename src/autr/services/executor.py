@@ -116,6 +116,18 @@ class Executor:
                 order_id=order_result.get("order_id"),
             )
 
+            # 5b. 포지션 DB 기록 — 실제 체결가/수량으로 즉시 생성
+            try:
+                await self.db.create_position(
+                    symbol=symbol,
+                    position_type="long",
+                    entry_price=close_price,
+                    quantity=filled_qty,
+                    dollar_amount=filled_qty * close_price,
+                )
+            except Exception as _pe:
+                logger.warning("[Executor] 포지션 생성 DB 기록 실패: %s", _pe)
+
             # 6. Signal ID 처리 완료 표시
             await self.redis.mark_processed(sig_id, ttl=_PROCESSED_TTL)
 
@@ -265,20 +277,41 @@ class Executor:
 
             elif decision.action == "open_missing_local":
                 # DB=NONE, Exchange=OPEN → DB에 포지션 추가
-                logger.warning("[Executor] Reconcile: 거래소 포지션 있음, 로컬 없음 → DB 복구: %s", symbol)
                 current_price = await self.client.get_current_price(symbol)
+                dust_value = exchange_qty * float(current_price)
+                if dust_value < self.client.min_order_size:
+                    logger.info("[Executor] Reconcile: 거래소 dust 잔고 무시 (%.6f %s = $%.4f)", exchange_qty, symbol, dust_value)
+                    return {"action": "noop", "symbol": symbol, "reason": "dust_ignored"}
+                logger.warning("[Executor] Reconcile: 거래소 포지션 있음, 로컬 없음 → DB 복구: %s", symbol)
                 await _notify(f"⚠️ [{symbol}] Reconcile: 로컬 DB에 없는 포지션 발견, 복구")
                 await self.db.create_position(
                     symbol=symbol,
                     position_type="long",
                     entry_price=float(current_price),
                     quantity=exchange_qty,
-                    dollar_amount=exchange_qty * float(current_price),
+                    dollar_amount=dust_value,
                 )
                 return {"action": "open_missing_local", "symbol": symbol, "exchange_qty": exchange_qty}
 
             else:
                 # adjust_qty — 거래소 기준으로 로컬 DB 동기화
+                current_price = await self.client.get_current_price(symbol)
+                dust_value = exchange_qty * float(current_price)
+
+                # 기존 열린 포지션 전부 닫기
+                open_positions = await self.db.get_positions(status="open", symbol=symbol)
+                for pos in open_positions:
+                    await self.db.close_position(pos["id"], float(current_price))
+
+                if dust_value < self.client.min_order_size:
+                    # 거래소 잔고가 dust → 포지션 정리만 하고 새 포지션 생성 안 함
+                    logger.info(
+                        "[Executor] Reconcile: adjust_qty → dust 잔고(%.6f %s = $%.4f), 포지션 정리만",
+                        exchange_qty, symbol, dust_value,
+                    )
+                    await _notify(f"⚠️ [{symbol}] Reconcile: dust 잔고({exchange_qty:.6f}), 로컬 포지션 정리")
+                    return {"action": "close_dust", "symbol": symbol, "exchange_qty": exchange_qty}
+
                 logger.warning(
                     "[Executor] Reconcile: qty 불일치 local=%.6f exchange=%.6f → DB 동기화: %s",
                     local_qty,
@@ -288,18 +321,13 @@ class Executor:
                 await _notify(
                     f"⚠️ [{symbol}] Reconcile: qty 불일치 local={local_qty:.6f} exchange={exchange_qty:.6f} → DB 동기화"
                 )
-                # 기존 열린 포지션 전부 닫기
-                current_price = await self.client.get_current_price(symbol)
-                open_positions = await self.db.get_positions(status="open", symbol=symbol)
-                for pos in open_positions:
-                    await self.db.close_position(pos["id"], float(current_price))
                 # 거래소 실제 수량으로 새 포지션 생성
                 await self.db.create_position(
                     symbol=symbol,
                     position_type="long",
                     entry_price=float(current_price),
                     quantity=exchange_qty,
-                    dollar_amount=exchange_qty * float(current_price),
+                    dollar_amount=dust_value,
                 )
                 return {
                     "action": "adjust_qty",
