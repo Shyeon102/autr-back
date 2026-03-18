@@ -204,9 +204,9 @@ class BybitClient:
     def _get_symbol_precision(self, symbol: str) -> int:
         """심볼별 소수점 정밀도 반환"""
         precision_map = {
-            "BTCUSDT": 6,
-            "XRPUSDT": 1,  # XRP는 소수점 1자리
-            "SOLUSDT": 3   # SOL은 소수점 3자리
+            "BTCUSDT": 6,   # basePrecision=0.000001
+            "XRPUSDT": 2,   # basePrecision=0.01
+            "SOLUSDT": 4,   # basePrecision=0.0001
         }
         return precision_map.get(symbol, 6)
 
