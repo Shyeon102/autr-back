@@ -259,6 +259,12 @@ class Executor:
             local_data = positions.get(symbol, {}).get("spot", {})
             local_qty = float(local_data.get("total_quantity", 0.0))
 
+            # 차이가 dust 수준($5 미만)이면 무시
+            current_price = await self.client.get_current_price(symbol)
+            diff_value = abs(local_qty - exchange_qty) * float(current_price)
+            if diff_value < self.client.min_order_size:
+                return {"action": "noop", "symbol": symbol, "reason": "diff_is_dust"}
+
             decision = reconcile_domain.reconcile(local_qty, exchange_qty)
 
             if decision.action == "noop":
@@ -271,13 +277,11 @@ class Executor:
                 await _notify(f"⚠️ [{symbol}] Reconcile: 거래소 포지션 없음, 로컬 DB 정리")
                 open_positions = await self.db.get_positions(status="open", symbol=symbol)
                 for pos in open_positions:
-                    current_price = await self.client.get_current_price(symbol)
                     await self.db.close_position(pos["id"], float(current_price))
                 return {"action": "close_orphan_local", "symbol": symbol, "local_qty": local_qty}
 
             elif decision.action == "open_missing_local":
                 # DB=NONE, Exchange=OPEN → DB에 포지션 추가
-                current_price = await self.client.get_current_price(symbol)
                 dust_value = exchange_qty * float(current_price)
                 if dust_value < self.client.min_order_size:
                     logger.info("[Executor] Reconcile: 거래소 dust 잔고 무시 (%.6f %s = $%.4f)", exchange_qty, symbol, dust_value)
@@ -295,7 +299,6 @@ class Executor:
 
             else:
                 # adjust_qty — 거래소 기준으로 로컬 DB 동기화
-                current_price = await self.client.get_current_price(symbol)
                 dust_value = exchange_qty * float(current_price)
 
                 # 기존 열린 포지션 전부 닫기
