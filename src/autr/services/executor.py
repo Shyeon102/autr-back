@@ -254,10 +254,9 @@ class Executor:
             # 거래소 포지션 조회
             exchange_qty = await self._get_exchange_qty(symbol)
 
-            # 로컬 포지션 조회
-            positions = await self.db.get_current_positions()
-            local_data = positions.get(symbol, {}).get("spot", {})
-            local_qty = float(local_data.get("total_quantity", 0.0))
+            # 로컬 포지션 조회 — positions 테이블 open 기준 (trades 합산 아님)
+            open_positions_local = await self.db.get_positions(status="open", symbol=symbol)
+            local_qty = sum(float(p.get("quantity", 0)) for p in open_positions_local)
 
             # 차이가 dust 수준($5 미만)이면 무시
             current_price = await self.client.get_current_price(symbol)
@@ -275,8 +274,7 @@ class Executor:
                 # DB=OPEN, Exchange=NONE → DB 정리
                 logger.warning("[Executor] Reconcile: 로컬 포지션 있음, 거래소 없음 → DB 정리: %s", symbol)
                 await _notify(f"⚠️ [{symbol}] Reconcile: 거래소 포지션 없음, 로컬 DB 정리")
-                open_positions = await self.db.get_positions(status="open", symbol=symbol)
-                for pos in open_positions:
+                for pos in open_positions_local:
                     await self.db.close_position(pos["id"], float(current_price))
                 return {"action": "close_orphan_local", "symbol": symbol, "local_qty": local_qty}
 
@@ -302,8 +300,7 @@ class Executor:
                 dust_value = exchange_qty * float(current_price)
 
                 # 기존 열린 포지션 전부 닫기
-                open_positions = await self.db.get_positions(status="open", symbol=symbol)
-                for pos in open_positions:
+                for pos in open_positions_local:
                     await self.db.close_position(pos["id"], float(current_price))
 
                 if dust_value < self.client.min_order_size:
