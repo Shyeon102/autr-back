@@ -35,14 +35,16 @@ logging.basicConfig(
 logger = logging.getLogger("executor-consumer")
 
 _HB_TTL = int(os.getenv("WATCHDOG_EXECUTOR_THRESHOLD_SEC", "300"))
-_HB_INTERVAL = 60   # heartbeat 갱신 주기 (초)
-_POP_TIMEOUT = 30   # blocking pop 대기 시간 (초)
+_HB_INTERVAL = 60    # heartbeat 갱신 주기 (초)
+_POP_TIMEOUT = 30    # blocking pop 대기 시간 (초)
+_RECONCILE_INTERVAL = int(os.getenv("RECONCILE_INTERVAL_SEC", "300"))  # 기본 5분
 
 
-async def run(executor: Executor, redis) -> None:
+async def run(executor: Executor, redis, symbol: str) -> None:
     """Signal 큐에서 무한 소비."""
     import time
     last_hb = 0.0
+    last_reconcile = 0.0
 
     logger.info("[ExecutorConsumer] 시작, 큐=%s", SIGNAL_QUEUE)
 
@@ -50,11 +52,22 @@ async def run(executor: Executor, redis) -> None:
         try:
             raw = await redis.queue_pop(SIGNAL_QUEUE, timeout=_POP_TIMEOUT)
 
-            # heartbeat 갱신 (주기적)
             now = time.monotonic()
+
+            # heartbeat 갱신 (주기적)
             if now - last_hb >= _HB_INTERVAL:
                 await record_heartbeat("executor", redis, ttl=_HB_TTL)
                 last_hb = now
+
+            # 주기적 reconcile — 수동 거래로 인한 포지션 불일치 감지 및 자동 복구
+            if now - last_reconcile >= _RECONCILE_INTERVAL:
+                try:
+                    result = await executor.reconcile(symbol)
+                    if result.get("action") != "noop":
+                        logger.info("[ExecutorConsumer] 주기적 Reconcile: %s", result)
+                except Exception as _re:
+                    logger.warning("[ExecutorConsumer] 주기적 Reconcile 실패: %s", _re)
+                last_reconcile = now
 
             if raw is None:
                 continue
@@ -120,7 +133,7 @@ async def main() -> None:
     except Exception as exc:
         logger.warning("[ExecutorConsumer] Reconcile 실패 (계속 진행): %s", exc)
 
-    await run(executor, redis)
+    await run(executor, redis, symbol)
 
 
 if __name__ == "__main__":
