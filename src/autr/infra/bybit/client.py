@@ -350,6 +350,184 @@ class BybitClient:
             logger.warning("캔들 데이터 조회 오류 (%s): %s", symbol, e)
             return []
     
+    # ------------------------------------------------------------------ #
+    # Linear (USDT Perpetual) Methods — Funding Rate Arbitrage용
+    # ------------------------------------------------------------------ #
+
+    async def place_linear_order(
+        self,
+        symbol: str = "BTCUSDT",
+        side: str = "Sell",
+        qty: str = "0",
+        reduce_only: bool = False,
+    ) -> Dict[str, Any]:
+        """USDT 무기한 선물 시장가 주문."""
+        if not self.authenticated:
+            return {"success": False, "error": "API 키 없음"}
+
+        try:
+            current_price = await self.get_current_price(symbol)
+            order_value = float(qty) * current_price
+
+            logger.info(
+                "선물 주문: %s %s %s ($%.2f) reduce_only=%s",
+                side, qty, symbol, order_value, reduce_only,
+            )
+
+            response = await self._call(
+                self.session.place_order,
+                category="linear",
+                symbol=symbol,
+                side=side,
+                orderType="Market",
+                qty=qty,
+                reduceOnly=reduce_only,
+            )
+
+            if response["retCode"] == 0:
+                order_id = response["result"]["orderId"]
+                filled_qty = await self._get_linear_filled_qty(
+                    symbol, order_id, float(qty),
+                )
+                logger.info(
+                    "선물 주문 성공: %s %s %s filled=%.6f",
+                    side, qty, symbol, filled_qty,
+                )
+                return {
+                    "success": True,
+                    "order_id": order_id,
+                    "filled_qty": filled_qty,
+                    "data": response["result"],
+                }
+            else:
+                logger.warning("선물 주문 실패: %s", response["retMsg"])
+                return {"success": False, "error": response["retMsg"]}
+
+        except Exception as e:
+            logger.error("선물 주문 오류: %s", e)
+            return {"success": False, "error": str(e)}
+
+    async def _get_linear_filled_qty(
+        self, symbol: str, order_id: str, requested_qty: float,
+    ) -> float:
+        """선물 주문 체결 수량 조회."""
+        try:
+            await asyncio.sleep(0.5)
+            response = await self._call(
+                self.session.get_order_history,
+                category="linear",
+                symbol=symbol,
+                orderId=order_id,
+                limit=1,
+            )
+            if response["retCode"] == 0 and response["result"]["list"]:
+                order = response["result"]["list"][0]
+                cum_exec = float(order.get("cumExecQty", 0) or 0)
+                return cum_exec if cum_exec > 0 else requested_qty
+        except Exception as e:
+            logger.warning("선물 체결 수량 조회 실패 (%s): %s", order_id, e)
+        return requested_qty
+
+    async def get_linear_positions(self, symbol: str = "BTCUSDT") -> Dict[str, Any]:
+        """USDT 무기한 선물 포지션 조회."""
+        if not self.authenticated:
+            return {}
+
+        try:
+            response = await self._call(
+                self.session.get_positions,
+                category="linear",
+                symbol=symbol,
+            )
+            if response["retCode"] == 0 and response["result"]["list"]:
+                pos = response["result"]["list"][0]
+                return {
+                    "symbol": pos.get("symbol", symbol),
+                    "side": pos.get("side", ""),           # Buy or Sell
+                    "size": float(pos.get("size", 0) or 0),
+                    "entry_price": float(pos.get("avgPrice", 0) or 0),
+                    "mark_price": float(pos.get("markPrice", 0) or 0),
+                    "liq_price": float(pos.get("liqPrice", 0) or 0),
+                    "unrealized_pnl": float(pos.get("unrealisedPnl", 0) or 0),
+                    "position_value": float(pos.get("positionValue", 0) or 0),
+                    "leverage": pos.get("leverage", "1"),
+                    "position_margin": float(pos.get("positionIM", 0) or 0),
+                }
+            return {}
+        except Exception as e:
+            logger.warning("선물 포지션 조회 오류 (%s): %s", symbol, e)
+            return {}
+
+    async def set_leverage(
+        self, symbol: str = "BTCUSDT", buy_leverage: str = "1", sell_leverage: str = "1",
+    ) -> bool:
+        """선물 레버리지 설정."""
+        if not self.authenticated:
+            return False
+        try:
+            response = await self._call(
+                self.session.set_leverage,
+                category="linear",
+                symbol=symbol,
+                buyLeverage=buy_leverage,
+                sellLeverage=sell_leverage,
+            )
+            # retCode 110043 = leverage not modified (이미 설정됨) → 성공 취급
+            if response["retCode"] in (0, 110043):
+                return True
+            logger.warning("레버리지 설정 실패: %s", response["retMsg"])
+            return False
+        except Exception as e:
+            logger.warning("레버리지 설정 오류: %s", e)
+            return False
+
+    async def get_wallet_balance(self) -> Dict[str, Any]:
+        """Unified 계정 전체 마진 정보 조회."""
+        if not self.authenticated:
+            return {}
+        try:
+            response = await self._call(
+                self.session.get_wallet_balance,
+                accountType="UNIFIED",
+            )
+            if response["retCode"] == 0 and response["result"]["list"]:
+                account = response["result"]["list"][0]
+                return {
+                    "total_equity": float(account.get("totalEquity", 0) or 0),
+                    "total_margin_balance": float(account.get("totalMarginBalance", 0) or 0),
+                    "total_available_balance": float(account.get("totalAvailableBalance", 0) or 0),
+                    "total_initial_margin": float(account.get("totalInitialMargin", 0) or 0),
+                    "total_maintenance_margin": float(account.get("totalMaintenanceMargin", 0) or 0),
+                    "account_im_rate": float(account.get("accountIMRate", 0) or 0),
+                    "account_mm_rate": float(account.get("accountMMRate", 0) or 0),
+                }
+            return {}
+        except Exception as e:
+            logger.warning("지갑 잔고 조회 오류: %s", e)
+            return {}
+
+    async def get_linear_ticker(self, symbol: str = "BTCUSDT") -> Dict[str, Any]:
+        """선물 시장 티커 조회 (mark price, funding rate 등)."""
+        try:
+            response = await self._call(
+                self.session.get_tickers,
+                category="linear",
+                symbol=symbol,
+            )
+            if response["retCode"] == 0 and response["result"]["list"]:
+                t = response["result"]["list"][0]
+                return {
+                    "last_price": float(t.get("lastPrice", 0) or 0),
+                    "mark_price": float(t.get("markPrice", 0) or 0),
+                    "index_price": float(t.get("indexPrice", 0) or 0),
+                    "funding_rate": float(t.get("fundingRate", 0) or 0),
+                    "next_funding_time": int(t.get("nextFundingTime", 0) or 0),
+                }
+            return {}
+        except Exception as e:
+            logger.warning("선물 티커 조회 오류 (%s): %s", symbol, e)
+            return {}
+
     async def get_multiple_kline_data(self, symbols: list = None, interval: str = "1", limit: int = 200) -> Dict[str, list]:
         """여러 암호화폐의 캔들스틱 데이터 동시 조회"""
         if symbols is None:

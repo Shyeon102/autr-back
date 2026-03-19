@@ -27,9 +27,12 @@ from dotenv import load_dotenv
 from autr.domain import ids as id_gen
 from autr.infra.db.factory import create_db
 from autr.infra.db.quant_store import create_quant_store
+from autr.domain.regime import RegimeClassifier, RegimeParams, REGIME_STRATEGY_MAP, RegimeType
 from autr.infra.queue_keys import (
     SIGNAL_QUEUE,
     active_strategy_key,
+    auto_switch_key,
+    regime_state_key,
     strategy_state_key,
     tick_queue,
     trading_enabled_key,
@@ -99,6 +102,10 @@ class StrategyConsumer:
         self._last_signal: str = "hold"
         self._last_reason: str = ""
         self._last_close: float = 0.0
+
+        # Regime classifier
+        self.regime_classifier = RegimeClassifier(RegimeParams())
+        self._last_regime: Optional[dict] = None
 
     # ------------------------------------------------------------------ #
     # 메인 루프
@@ -194,14 +201,19 @@ class StrategyConsumer:
         self._last_reason = decision.reason
         self._last_close = decision.close_price
 
-        # signal_log 기록 (매 틱 — 전략 분석용)
+        # signal_log 기록 (매 틱 — 전략 분석용, regime 정보 포함)
+        indicators = {"close": decision.close_price}
+        if self._last_regime:
+            indicators["regime"] = self._last_regime.get("regime", "")
+            indicators["regime_confidence"] = self._last_regime.get("confidence", 0.0)
+            indicators["adx"] = self._last_regime.get("adx", 0.0)
         try:
             await self.db.add_signal_log(
                 symbol=symbol,
                 strategy=self.strategy_name,
                 signal=decision.signal,
                 reason=decision.reason,
-                indicators={"close": decision.close_price},
+                indicators=indicators,
                 trailing_stop=self.trailing_stop,
                 in_position=self.in_position,
                 params=self.params.to_dict() if hasattr(self.params, "to_dict") else {},
@@ -210,6 +222,10 @@ class StrategyConsumer:
             logger.debug("[StrategyConsumer] signal_log 기록 실패: %s", _sl_err)
 
         enabled = bool(await self.redis.get(trading_enabled_key(self.symbol)))
+
+        # ── Auto-switch: regime에 따라 전략 자동 전환 ──
+        if self._last_regime and not self.in_position:
+            await self._maybe_auto_switch(self._last_regime)
 
         if enabled:
             if decision.signal == "buy" and not self.in_position:
@@ -249,6 +265,17 @@ class StrategyConsumer:
             return None
 
         df = pd.DataFrame([dict(r) for r in rows]).sort_values("ts").reset_index(drop=True)
+
+        # ── Regime 판정 ──
+        regime_state = self.regime_classifier.compute(df)
+        if regime_state:
+            self._last_regime = regime_state.to_dict()
+            logger.debug(
+                "[RegimeClassifier] %s regime=%s conf=%.2f adx=%.1f gap=%.4f vol_pct=%.2f",
+                symbol, regime_state.regime, regime_state.confidence,
+                regime_state.adx, regime_state.trend_gap_pct, regime_state.vol_percentile,
+            )
+
         frame = self.engine.build_indicator_frame(df)
         if frame.empty:
             return None
@@ -283,6 +310,12 @@ class StrategyConsumer:
             return None
 
         ltf_df = pd.DataFrame([dict(r) for r in ltf_rows]).sort_values("ts").reset_index(drop=True)
+
+        # ── Regime 판정 (LTF 데이터 기반) ──
+        regime_state = self.regime_classifier.compute(ltf_df)
+        if regime_state:
+            self._last_regime = regime_state.to_dict()
+
         ltf_frame = self.engine.build_ltf_frame(ltf_df)
         if ltf_frame.empty:
             return None
@@ -332,9 +365,68 @@ class StrategyConsumer:
             "close_price": self._last_close,
             "bars_since_trade": self.bars_since_trade,
             "parameters": self.params.to_dict(),
+            "regime": self._last_regime,
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }
         await self.redis.set(strategy_state_key(self.symbol), json.dumps(state), ex=_STATE_TTL)
+
+        # Regime 상태를 별도 키에도 저장 (API 조회용)
+        if self._last_regime:
+            await self.redis.set(
+                regime_state_key(self.symbol),
+                json.dumps(self._last_regime),
+                ex=_STATE_TTL,
+            )
+
+    # ------------------------------------------------------------------ #
+    # Auto-switch (regime 기반 전략 자동 전환)
+    # ------------------------------------------------------------------ #
+
+    async def _maybe_auto_switch(self, regime_dict: dict) -> None:
+        """
+        config:auto_switch:{symbol}이 활성화되어 있고,
+        포지션이 없을 때만 regime에 맞는 전략으로 자동 전환.
+        """
+        auto_switch = await self.redis.get(auto_switch_key(self.symbol))
+        if not auto_switch:
+            return
+
+        try:
+            regime_type = RegimeType(regime_dict.get("regime", ""))
+        except ValueError:
+            return
+
+        suggested = REGIME_STRATEGY_MAP.get(regime_type)
+
+        # 관망 레짐 (TRENDING_DOWN, VOLATILE) → 전략 전환 안함, 현재 전략 유지
+        if suggested is None:
+            return
+
+        if suggested == self.strategy_name:
+            return
+
+        # 전략 전환
+        params_cls = STRATEGY_PARAMS_MAP.get(suggested)
+        if params_cls is None:
+            return
+
+        logger.info(
+            "[AutoSwitch] regime=%s → 전략 교체: %s → %s",
+            regime_type.value, self.strategy_name, suggested,
+        )
+        self.strategy_name = suggested
+        self.params = params_cls(symbol=self.symbol)
+
+        preset = BUILTIN_PRESETS.get((suggested, self.symbol), {})
+        if preset:
+            apply_preset_overrides(self.params, preset)
+
+        self.engine = _build_engine(suggested, self.params)
+        self.trailing_stop = None
+        self._last_reason = f"auto_switch:{regime_type.value}"
+
+        # Redis에도 전략 변경 반영 (API 서버 동기화)
+        await self.redis.set(active_strategy_key(self.symbol), suggested)
 
     # ------------------------------------------------------------------ #
     # Heartbeat

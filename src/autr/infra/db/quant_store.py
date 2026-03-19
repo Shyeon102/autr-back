@@ -273,6 +273,52 @@ class QuantSQLiteStore:
             )
             return cur.fetchall()
 
+    # ── Funding Rate 조회 (Funding Arb용) ─────────────────────────────────
+
+    def fetch_latest_funding_rate(self, symbol: str) -> dict:
+        """raw_ticker (linear)에서 최신 펀딩비 조회."""
+        with self._connect() as conn:
+            cur = conn.execute(
+                """
+                SELECT ts, funding_rate, mark_price, last_price, index_price
+                FROM raw_ticker
+                WHERE symbol = ? AND market_type = 'linear'
+                ORDER BY ts DESC LIMIT 1
+                """,
+                (symbol,),
+            )
+            row = cur.fetchone()
+            return dict(row) if row else {}
+
+    def fetch_funding_rate_history(self, symbol: str, limit: int = 20) -> list:
+        """raw_funding_rates에서 과거 펀딩비 이력 조회."""
+        with self._connect() as conn:
+            cur = conn.execute(
+                """
+                SELECT ts, funding_rate, mark_price
+                FROM raw_funding_rates
+                WHERE symbol = ?
+                ORDER BY ts DESC LIMIT ?
+                """,
+                (symbol, limit),
+            )
+            return [dict(r) for r in cur.fetchall()]
+
+    def fetch_latest_spot_ticker(self, symbol: str) -> dict:
+        """raw_ticker (spot)에서 최신 현물 가격 조회."""
+        with self._connect() as conn:
+            cur = conn.execute(
+                """
+                SELECT ts, last_price, bid1, ask1
+                FROM raw_ticker
+                WHERE symbol = ? AND market_type = 'spot'
+                ORDER BY ts DESC LIMIT 1
+                """,
+                (symbol,),
+            )
+            row = cur.fetchone()
+            return dict(row) if row else {}
+
     def start_run(self) -> int:
         with self._connect() as conn:
             cur = conn.execute(
@@ -369,6 +415,67 @@ class QuantPostgresStore:
                     (symbol, market_type, timeframe, limit),
                 )
                 return cur.fetchall()
+        finally:
+            self._put_conn(conn)
+
+    # ── Funding Rate 조회 (Funding Arb용) ─────────────────────────────────
+
+    def fetch_latest_funding_rate(self, symbol: str) -> dict:
+        """raw_ticker (linear)에서 최신 펀딩비 조회."""
+        import psycopg2.extras
+        conn = self._get_conn()
+        try:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT ts, funding_rate, mark_price, last_price, index_price
+                    FROM raw_ticker
+                    WHERE symbol = %s AND market_type = 'linear'
+                    ORDER BY ts DESC LIMIT 1
+                    """,
+                    (symbol,),
+                )
+                row = cur.fetchone()
+                return dict(row) if row else {}
+        finally:
+            self._put_conn(conn)
+
+    def fetch_funding_rate_history(self, symbol: str, limit: int = 20) -> list:
+        """raw_funding_rates에서 과거 펀딩비 이력 조회."""
+        import psycopg2.extras
+        conn = self._get_conn()
+        try:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT ts, funding_rate, mark_price
+                    FROM raw_funding_rates
+                    WHERE symbol = %s
+                    ORDER BY ts DESC LIMIT %s
+                    """,
+                    (symbol, limit),
+                )
+                return [dict(r) for r in cur.fetchall()]
+        finally:
+            self._put_conn(conn)
+
+    def fetch_latest_spot_ticker(self, symbol: str) -> dict:
+        """raw_ticker (spot)에서 최신 현물 가격 조회."""
+        import psycopg2.extras
+        conn = self._get_conn()
+        try:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT ts, last_price, bid1, ask1
+                    FROM raw_ticker
+                    WHERE symbol = %s AND market_type = 'spot'
+                    ORDER BY ts DESC LIMIT 1
+                    """,
+                    (symbol,),
+                )
+                row = cur.fetchone()
+                return dict(row) if row else {}
         finally:
             self._put_conn(conn)
 

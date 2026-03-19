@@ -54,6 +54,47 @@ class StrategyParamsUpdateRequest(BaseModel):
 
 AVAILABLE_STRATEGIES = ["regime_trend", "breakout_volume", "mean_reversion", "dual_timeframe"]
 
+
+@router.get("/trading/regime/{symbol}")
+async def get_regime_state(request: Request, symbol: str = "BTCUSDT"):
+    """현재 시장 레짐 분류 상태 조회"""
+    import json as _json
+    from autr.infra.queue_keys import regime_state_key
+    redis = request.app.state.redis
+
+    normalized_symbol = symbol.strip().upper()
+    raw = await redis.get(regime_state_key(normalized_symbol))
+    if not raw:
+        return {
+            "symbol": normalized_symbol,
+            "regime": None,
+            "note": "regime data not available yet (strategy consumer may not be running)",
+        }
+
+    regime = _json.loads(raw)
+    regime["symbol"] = normalized_symbol
+    return regime
+
+
+@router.post("/trading/auto-switch")
+@limiter.limit("10/minute")
+async def toggle_auto_switch(
+    request: Request,
+    _auth=Depends(require_api_key),
+):
+    """Regime 기반 자동 전략 전환 토글"""
+    from autr.infra.queue_keys import auto_switch_key
+    redis = request.app.state.redis
+    symbol = os.getenv("STRATEGY_SYMBOL", "BTCUSDT").upper()
+
+    current = await redis.get(auto_switch_key(symbol))
+    if current:
+        await redis.delete(auto_switch_key(symbol))
+        return {"auto_switch": False, "symbol": symbol}
+    else:
+        await redis.set(auto_switch_key(symbol), "1")
+        return {"auto_switch": True, "symbol": symbol}
+
 class StrategyChangeRequest(BaseModel):
     strategy: str
 
@@ -880,21 +921,40 @@ async def list_strategies(request: Request):
         "regime_trend": {
             "name": "Regime Trend Engine",
             "description": "Dual EMA regime filter with ATR trailing stop. Best in trending markets.",
+            "best_regime": "trending_up",
         },
         "breakout_volume": {
             "name": "Breakout + Volume",
             "description": "Enters on prior-high breakout confirmed by volume surge. Reduces false breakouts.",
+            "best_regime": "trending_up",
         },
         "mean_reversion": {
             "name": "Mean Reversion",
             "description": "Buys when RSI is oversold and price is below Bollinger lower band. Best in ranging markets.",
+            "best_regime": "range",
         },
         "dual_timeframe": {
             "name": "Dual Timeframe",
             "description": "Uses 1H trend direction + 15M pullback entry. Filters noise with multi-TF confluence.",
+            "best_regime": "trending_up",
         },
     }
-    return {"current": current, "available": strategies}
+
+    # 현재 regime 상태 추가
+    import json as _json
+    from autr.infra.queue_keys import regime_state_key, auto_switch_key
+    redis = request.app.state.redis
+    symbol = os.getenv("STRATEGY_SYMBOL", "BTCUSDT").upper()
+    regime_raw = await redis.get(regime_state_key(symbol))
+    regime = _json.loads(regime_raw) if regime_raw else None
+    auto_switch = bool(await redis.get(auto_switch_key(symbol)))
+
+    return {
+        "current": current,
+        "available": strategies,
+        "regime": regime,
+        "auto_switch": auto_switch,
+    }
 
 
 @router.get("/trading/presets")
@@ -1089,3 +1149,58 @@ async def db_summary(_auth=Depends(require_api_key)):
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ── Funding Rate Arbitrage 관리 ──────────────────────────────────────────
+
+@router.get("/funding-arb/status")
+async def get_funding_arb_status(request: Request):
+    """펀딩비 아비트라지 현재 상태 조회"""
+    import json as _json
+    from autr.infra.queue_keys import funding_arb_state_key, funding_arb_enabled_key
+    redis = request.app.state.redis
+    symbol = os.getenv("FUNDING_ARB_SYMBOL", "BTCUSDT").upper()
+
+    enabled = bool(await redis.get(funding_arb_enabled_key(symbol)))
+    state_raw = await redis.get(funding_arb_state_key(symbol))
+
+    if state_raw:
+        state = _json.loads(state_raw)
+        state["enabled"] = enabled
+        return state
+
+    return {
+        "symbol": symbol,
+        "enabled": enabled,
+        "note": "funding_arb consumer not running or no state yet",
+    }
+
+
+@router.post("/funding-arb/start")
+@limiter.limit("5/minute")
+async def start_funding_arb(request: Request, _auth=Depends(require_api_key)):
+    """펀딩비 아비트라지 활성화"""
+    from autr.infra.queue_keys import funding_arb_enabled_key
+    redis = request.app.state.redis
+    symbol = os.getenv("FUNDING_ARB_SYMBOL", "BTCUSDT").upper()
+
+    already = await redis.get(funding_arb_enabled_key(symbol))
+    if already:
+        return {"message": "Funding arb already active", "symbol": symbol}
+
+    await redis.set(funding_arb_enabled_key(symbol), "1")
+    logger.info("[API] 펀딩비 아비트라지 활성화: %s", symbol)
+    return {"message": "Funding arb started", "symbol": symbol}
+
+
+@router.post("/funding-arb/stop")
+@limiter.limit("5/minute")
+async def stop_funding_arb(request: Request, _auth=Depends(require_api_key)):
+    """펀딩비 아비트라지 비활성화"""
+    from autr.infra.queue_keys import funding_arb_enabled_key
+    redis = request.app.state.redis
+    symbol = os.getenv("FUNDING_ARB_SYMBOL", "BTCUSDT").upper()
+
+    await redis.delete(funding_arb_enabled_key(symbol))
+    logger.info("[API] 펀딩비 아비트라지 비활성화: %s", symbol)
+    return {"message": "Funding arb stopped", "symbol": symbol}

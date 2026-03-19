@@ -33,3 +33,23 @@ def active_strategy_key(symbol: str) -> str:
 
 
 SIGNAL_QUEUE = "queue:signals"
+
+
+def regime_state_key(symbol: str) -> str:
+    """Regime 분류기 상태 키. e.g. state:regime:BTCUSDT"""
+    return f"state:regime:{symbol.upper()}"
+
+
+def auto_switch_key(symbol: str) -> str:
+    """자동 전략 전환 활성 키. e.g. config:auto_switch:BTCUSDT"""
+    return f"config:auto_switch:{symbol.upper()}"
+
+
+def funding_arb_state_key(symbol: str) -> str:
+    """펀딩비 아비트라지 상태 키. e.g. state:funding_arb:BTCUSDT"""
+    return f"state:funding_arb:{symbol.upper()}"
+
+
+def funding_arb_enabled_key(symbol: str) -> str:
+    """펀딩비 아비트라지 활성 키. e.g. trading:funding_arb:BTCUSDT"""
+    return f"trading:funding_arb:{symbol.upper()}"

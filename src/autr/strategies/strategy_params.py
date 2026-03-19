@@ -169,6 +169,46 @@ def dual_timeframe_param_descriptions() -> Dict[str, str]:
     }
 
 
+@dataclass
+class FundingArbParams:
+    symbol: str = "BTCUSDT"
+
+    # Funding rate thresholds
+    funding_rate_entry_threshold: float = 0.0001   # 0.01%/8h → 진입
+    funding_rate_exit_threshold: float = 0.00003   # 0.003%/8h → 청산
+    funding_rate_lookback: int = 3                 # 최근 N회 평균
+
+    # Position sizing
+    max_notional_usd: float = 30.0                 # 레그당 최대 금액
+    leverage: int = 1
+
+    # Risk management
+    max_basis_divergence_pct: float = 1.0           # 현물-선물 가격차 1% 초과 시 긴급 청산
+    margin_safety_ratio: float = 0.3                # 마진 비율 30% 이하 시 긴급 청산
+
+    # Execution
+    loop_seconds: int = 60
+    cooldown_bars: int = 0
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+def funding_arb_param_descriptions() -> Dict[str, str]:
+    return {
+        "symbol": "Bybit symbol for funding arb (linear + spot).",
+        "funding_rate_entry_threshold": "Minimum avg funding rate (per 8h) to open position.",
+        "funding_rate_exit_threshold": "Funding rate below this → close position.",
+        "funding_rate_lookback": "Number of recent funding rate snapshots to average.",
+        "max_notional_usd": "Max USD notional per leg (spot buy / perp short).",
+        "leverage": "Linear perp leverage (default 1x).",
+        "max_basis_divergence_pct": "Max spot-perp price divergence % before emergency close.",
+        "margin_safety_ratio": "Min margin ratio before emergency close.",
+        "loop_seconds": "Polling interval in seconds.",
+        "cooldown_bars": "Bars to wait after closing before re-entry.",
+    }
+
+
 # ---------------------------------------------------------------------------
 # 코인별/전략별 빌트인 프리셋 (dataclass 기본값 위에 오버라이드)
 # Key: (strategy_name, symbol) → 변경할 필드만 포함
@@ -195,6 +235,7 @@ STRATEGY_PARAMS_MAP: Dict[str, type] = {
     "breakout_volume": BreakoutVolumeParams,
     "mean_reversion": MeanReversionParams,
     "dual_timeframe": DualTimeframeParams,
+    "funding_arb": FundingArbParams,
 }
 
 
