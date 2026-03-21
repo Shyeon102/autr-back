@@ -3,10 +3,16 @@ FROM python:3.12-slim
 RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-COPY pyproject.toml README.md alembic.ini /app/
+
+# 1) 의존성 레이어 (pyproject.toml이 안 바뀌면 캐시 히트)
+COPY pyproject.toml README.md /app/
+RUN pip install --no-cache-dir -e . 2>/dev/null || true
+
+# 2) 소스 레이어 (코드만 바뀌면 여기서부터만 재빌드)
 COPY src /app/src
 COPY scripts /app/scripts
 COPY docker /app/docker
+COPY alembic.ini /app/
 
 RUN pip install --no-cache-dir -e .
 
