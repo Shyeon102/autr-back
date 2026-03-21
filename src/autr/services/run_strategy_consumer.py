@@ -169,16 +169,14 @@ class StrategyConsumer:
         self._last_reason = "strategy_changed"
 
     async def _restore_state(self) -> None:
-        """DB의 open positions에서 in_position 복구."""
+        """positions 테이블(status=open)에서 in_position 복구."""
         try:
-            positions = await self.db.get_current_positions()
-            symbol_data = positions.get(self.symbol, {})
-            spot_data = symbol_data.get("spot", {})
-            qty = float(spot_data.get("total_quantity", 0))
+            open_positions = await self.db.get_positions(status="open", symbol=self.symbol)
+            qty = sum(float(p.get("quantity", 0)) for p in open_positions)
             self.in_position = qty > 0
             logger.info(
-                "[StrategyConsumer] 상태 복구 완료: symbol=%s in_position=%s (qty=%.6f)",
-                self.symbol, self.in_position, qty,
+                "[StrategyConsumer] 상태 복구 완료: symbol=%s in_position=%s (qty=%.6f, open_positions=%d)",
+                self.symbol, self.in_position, qty, len(open_positions),
             )
         except Exception as exc:
             logger.warning("[StrategyConsumer] 상태 복구 실패, 초기값 사용: %s", exc)
