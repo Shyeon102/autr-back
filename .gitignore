@@ -18,7 +18,7 @@ backend/.venv_run/
 *.db-shm
 *.db-wal
 *.sqlite
-backend/data/
+data/
 
 # Build
 build/
