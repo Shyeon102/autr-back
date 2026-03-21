@@ -52,22 +52,98 @@ jobs:
           REDIS_URL: redis://localhost:6379
         run: pytest tests/ -v --tb=short
 
+  detect-changes:
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    outputs:
+      infra: ${{ steps.filter.outputs.infra }}
+      collector: ${{ steps.filter.outputs.collector }}
+      strategy: ${{ steps.filter.outputs.strategy }}
+      executor: ${{ steps.filter.outputs.executor }}
+      funding_arb: ${{ steps.filter.outputs.funding_arb }}
+      api: ${{ steps.filter.outputs.api }}
+      watchdog: ${{ steps.filter.outputs.watchdog }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            infra:
+              - 'docker/**'
+              - 'pyproject.toml'
+              - 'src/autr/infra/**'
+              - 'src/autr/domain/**'
+            collector:
+              - 'src/autr/services/run_collector.py'
+            strategy:
+              - 'src/autr/services/run_strategy_consumer.py'
+              - 'src/autr/strategies/**'
+            executor:
+              - 'src/autr/services/run_executor_consumer.py'
+              - 'src/autr/services/executor.py'
+            funding_arb:
+              - 'src/autr/services/run_funding_arb.py'
+              - 'src/autr/services/funding_arb_executor.py'
+              - 'src/autr/strategies/funding_arb_strategy.py'
+            api:
+              - 'src/autr/api/**'
+              - 'src/autr/ops/**'
+            watchdog:
+              - 'src/autr/services/run_watchdog.py'
+
   deploy:
     runs-on: ubuntu-latest
-    needs: test
+    needs: [test, detect-changes]
     if: github.ref == 'refs/heads/main'
 
     steps:
       - name: Deploy to EC2
         uses: appleboy/ssh-action@v1
+        env:
+          INFRA: ${{ needs.detect-changes.outputs.infra }}
+          COLLECTOR: ${{ needs.detect-changes.outputs.collector }}
+          STRATEGY: ${{ needs.detect-changes.outputs.strategy }}
+          EXECUTOR: ${{ needs.detect-changes.outputs.executor }}
+          FUNDING_ARB: ${{ needs.detect-changes.outputs.funding_arb }}
+          API: ${{ needs.detect-changes.outputs.api }}
+          WATCHDOG: ${{ needs.detect-changes.outputs.watchdog }}
         with:
           host: ${{ secrets.EC2_HOST }}
           username: ubuntu
           key: ${{ secrets.EC2_SSH_KEY }}
+          envs: INFRA,COLLECTOR,STRATEGY,EXECUTOR,FUNDING_ARB,API,WATCHDOG
           script: |
+            set -e
             cd /home/ubuntu/auto-trading
             git pull origin main
-            docker compose -f docker/docker-compose.yml build
-            docker compose -f docker/docker-compose.yml up -d --remove-orphans
+
+            # infra 변경 (Dockerfile, pyproject, 공통 모듈) → 전체 리빌드
+            if [ "$INFRA" = "true" ]; then
+              echo "🔨 인프라 변경 감지 → 전체 리빌드"
+              docker compose -f docker/docker-compose.yml build
+              docker compose -f docker/docker-compose.yml up -d --remove-orphans
+            else
+              # 변경된 서비스만 빌드 + 재시작
+              SERVICES=""
+              [ "$COLLECTOR" = "true" ]    && SERVICES="$SERVICES collector"
+              [ "$STRATEGY" = "true" ]     && SERVICES="$SERVICES strategy_consumer"
+              [ "$EXECUTOR" = "true" ]     && SERVICES="$SERVICES executor_consumer"
+              [ "$FUNDING_ARB" = "true" ]  && SERVICES="$SERVICES funding_arb"
+              [ "$API" = "true" ]          && SERVICES="$SERVICES api"
+              [ "$WATCHDOG" = "true" ]     && SERVICES="$SERVICES watchdog"
+
+              if [ -n "$SERVICES" ]; then
+                echo "🔄 변경된 서비스: $SERVICES"
+                docker compose -f docker/docker-compose.yml build $SERVICES
+                docker compose -f docker/docker-compose.yml up -d --no-deps $SERVICES
+              else
+                echo "⏭️ 변경된 서비스 없음 — 스킵"
+              fi
+            fi
+
             docker image prune -f
             echo "✅ 배포 완료"
